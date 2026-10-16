@@ -180,20 +180,20 @@ export function createRequestHandler(service: SwitchGuardService, options: AppOp
       const m = /^\/api\/sessions\/([a-f0-9]{24})(\/.*)?$/.exec(path);
       if (!m) fail('not_found', 'Route not found', 404);
       const id = m[1]!, sub = m[2] ?? '';
+      const op = () => String(req.headers['x-operation-id'] ?? '');
+      // The body is read once and memoised: a write that loses a race with another instance is replayed.
+      let bodyCache: Buffer | undefined;
+      const bodyOnce = async (limit: number) => bodyCache ??= await readBody(req, limit);
+      const jsonOnce = async (): Promise<Record<string, any>> => {
+        const bytes = await bodyOnce(64 * 1024);
+        if (!bytes.length) return {};
+        try { return object(JSON.parse(bytes.toString('utf8'))); } catch { return fail('invalid_json', 'Invalid JSON body'); }
+      };
+      const audio = async () => {
+        if (req.headers['content-type'] !== 'audio/wav') fail('unsupported_media', 'Send canonical mono PCM16 audio/wav from the capture module', 415);
+        return new Uint8Array(await bodyOnce(MAX_AUDIO));
+      };
       const route = async (): Promise<Reply> => {
-        const op = () => String(req.headers['x-operation-id'] ?? '');
-        // The body is read once and memoised: a write that loses a race with another instance is replayed.
-        let bodyCache: Buffer | undefined;
-        const bodyOnce = async (limit: number) => bodyCache ??= await readBody(req, limit);
-        const jsonOnce = async (): Promise<Record<string, any>> => {
-          const bytes = await bodyOnce(64 * 1024);
-          if (!bytes.length) return {};
-          try { return object(JSON.parse(bytes.toString('utf8'))); } catch { return fail('invalid_json', 'Invalid JSON body'); }
-        };
-        const audio = async () => {
-          if (req.headers['content-type'] !== 'audio/wav') fail('unsupported_media', 'Send canonical mono PCM16 audio/wav from the capture module', 415);
-          return new Uint8Array(await bodyOnce(MAX_AUDIO));
-        };
         let r: RegExpExecArray | null;
 
         if (sub === '' && method === 'GET') { const rec = session(req, id, 'reviewer'); service.touch(rec, 'reviewer'); return { status: 200, body: service.reviewerView(rec) }; }
