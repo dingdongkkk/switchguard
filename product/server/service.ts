@@ -1,6 +1,7 @@
 /** Product service for Jobs 3–8. Reuses the foundation verbatim: DetectifClient + normalizeCombined
  * (src/server/detectif.ts), the decision engine (src/shared/decision.ts) and WAV validation
  * (src/media/wav.ts). It never computes its own detection outcome. */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -8,7 +9,30 @@ import { DetectifClient, PipelineError, failedResult, normalizeCombined, object,
 import { addWindow, applyResult, createSession, decide } from '../../src/shared/decision.js';
 import { encodeWav, inspectWav } from '../../src/media/wav.js';
 import { assignSpeakers, type SpeakerCluster, type VoiceProfile } from './voice-analysis.js';
-import { VoicePool } from './voice-pool.js';
+import { VoicePool, type AnalyseResult } from './voice-pool.js';
+import { analyse, buildProfile, wavTo16k } from './voice-analysis.js';
+import { StoreConflict, type SharedStore } from './store.js';
+
+/** Voice analysis runner: a worker thread on a long-running server, inline on serverless functions. */
+export interface VoiceRunner {
+  profile(wav: Uint8Array, sampleRate: number): Promise<VoiceProfile | null>;
+  analyse(wavs: Array<{ wav: Uint8Array; sampleRate: number; tailSec?: number }>, profile: VoiceProfile): Promise<AnalyseResult>;
+  readonly state: string; readonly queued: number; readonly restarts: number; readonly lastError?: string;
+  close(): Promise<void>;
+}
+class InlineVoice implements VoiceRunner {
+  state = 'inline'; queued = 0; restarts = 0; lastError?: string;
+  async profile(wav: Uint8Array, sampleRate: number) { return buildProfile(wavTo16k(wav, sampleRate)) ?? null; }
+  async analyse(wavs: Array<{ wav: Uint8Array; sampleRate: number; tailSec?: number }>, profile: VoiceProfile): Promise<AnalyseResult> {
+    const parts = wavs.map(({ wav, sampleRate, tailSec }) => { const x = wavTo16k(wav, sampleRate); return tailSec ? x.subarray(Math.max(0, x.length - Math.round(tailSec * 16_000))) : x; });
+    const buffer = new Float32Array(parts.reduce((n, p) => n + p.length, 0));
+    let k = 0; for (const p of parts) { buffer.set(p, k); k += p.length; }
+    const r = analyse(buffer, profile);
+    return { signals: r.signals, slices: r.slices, prefixSec: parts.length > 1 ? parts[0]!.length / 16_000 : 0, buffer };
+  }
+  async close() { /* nothing to stop */ }
+}
+interface MutationScope { after: Array<() => void>; uploads: Array<Promise<unknown>> }
 import { ContextBuffer } from '../../src/media/context-buffer.js';
 import type {
   AudioWindow, CaptureInterruption, CheckError, Decision, Interval, InterviewSession, Question, ReviewerResolution,
@@ -116,6 +140,10 @@ export interface ServiceConfig {
   sessionRetentionDays: number;
   /** Below this last-reported credit balance, targeted voice checks are skipped (window checks continue). */
   lowCreditThreshold: number;
+  /** Shared storage for multi-instance hosting (Vercel Blob). Unset = single process, local disk. */
+  sharedStore?: SharedStore;
+  /** Run voice analysis on the request thread (serverless) instead of a worker thread. */
+  inlineVoice?: boolean;
   provenance: 'detectif_live' | 'test_fixture'; now: () => number;
 }
 export const defaultConfig = (dataDir: string): ServiceConfig => ({
@@ -165,8 +193,12 @@ export class SwitchGuardService {
   private opsCache?: { atEpochMs: number; value: unknown };
   /** Last time each side fetched its view (epoch ms). Not persisted: presence is live-only. */
   private presence = new Map<string, { candidate?: number; reviewer?: number }>();
-  /** Voice analysis runs in a worker thread so it never blocks requests. */
-  readonly voice = new VoicePool();
+  /** Voice analysis runs in a worker thread so it never blocks requests (inline on serverless). */
+  readonly voice: VoiceRunner;
+  /** Shared store and the ETag of each cached record (multi-instance mode only). */
+  readonly shared?: SharedStore;
+  private etags = new Map<string, string>();
+  private scope = new AsyncLocalStorage<MutationScope>();
   private dirty = new Set<string>();
   private flushTimer?: ReturnType<typeof setTimeout>;
   /** Last storage failure (cleared by the next successful save). Reported by /api/health. */
@@ -178,6 +210,68 @@ export class SwitchGuardService {
   constructor(readonly client: DetectifClient, readonly config: ServiceConfig) {
     mkdirSync(join(config.dataDir, 'sessions'), { recursive: true });
     mkdirSync(join(config.dataDir, 'media'), { recursive: true });
+    this.shared = config.sharedStore;
+    this.voice = config.inlineVoice ? new InlineVoice() : new VoicePool();
+  }
+
+  // ---------- shared-store consistency (multi-instance) ----------
+  /** Runs `fn` after the current change is committed (immediately in single-process mode). */
+  private later(fn: () => void): void { const s = this.scope.getStore(); if (s) s.after.push(fn); else fn(); }
+  /** Loads the latest stored copy of a session into this instance (no-op in single-process mode). */
+  async pull(id: string): Promise<ProductRecord | undefined> {
+    if (!this.shared) return this.records.get(id);
+    const stored = await this.shared.getRecord(id);
+    if (!stored) { this.records.delete(id); this.etags.delete(id); return undefined; }
+    if (this.etags.get(id) !== stored.etag || !this.records.has(id)) {
+      this.records.set(id, JSON.parse(stored.json) as ProductRecord); this.etags.set(id, stored.etag);
+    }
+    return this.records.get(id);
+  }
+  /** Refreshes every session this instance knows about from the shared store (lists, sweeps). */
+  async pullAll(): Promise<void> {
+    if (!this.shared) return;
+    const listed = await this.shared.listRecords(), ids = new Set(listed.map(r => r.id));
+    for (const id of [...this.records.keys()]) if (!ids.has(id)) { this.records.delete(id); this.etags.delete(id); }
+    await Promise.all(listed.filter(r => this.etags.get(r.id) !== r.etag).map(r => this.pull(r.id)));
+  }
+  /** Conditional write of a session (create-only for new ones). Throws StoreConflict. */
+  private async commit(id: string): Promise<void> {
+    const rec = this.records.get(id);
+    if (!this.shared || !rec) { this.dirty.delete(id); return; }
+    const etag = await this.shared.putRecord(id, JSON.stringify(rec), this.etags.get(id));
+    this.etags.set(id, etag); this.dirty.delete(id); this.storageError = undefined;
+  }
+  /** Stores a newly created session (multi-instance mode). */
+  async persistNew(id: string): Promise<void> { if (this.shared) await this.commit(id); }
+  /** Applies a change to the latest copy of a session. In multi-instance mode a concurrent write by
+   * another instance makes the change replay on the fresh copy, so no update is ever lost. Background
+   * work started by the change runs only after it is committed. `missing: 'ignore'` is for background
+   * tasks whose session may have been deleted meanwhile. */
+  async mutate<T>(id: string, fn: (rec: ProductRecord) => T | Promise<T>, options: { missing?: 'fail' | 'ignore' } = {}): Promise<T | undefined> {
+    if (!this.shared) {
+      const rec = this.records.get(id);
+      if (!rec) { if (options.missing === 'ignore') return undefined; fail('not_found', 'Session not found', 404); }
+      return fn(rec);
+    }
+    for (let attempt = 0; ; attempt++) {
+      const rec = await this.pull(id);
+      if (!rec) { if (options.missing === 'ignore') return undefined; fail('not_found', 'Session not found', 404); }
+      const scope: MutationScope = { after: [], uploads: [] };
+      let out: T;
+      try { out = await this.scope.run(scope, () => fn(rec)); }
+      catch (error) { this.records.delete(id); this.etags.delete(id); this.dirty.delete(id); throw error; }   // drop partial local changes
+      if (this.records.get(id) === rec && this.dirty.has(id)) {
+        await Promise.all(scope.uploads);   // never reference media that is not stored yet
+        try { await this.commit(id); }
+        catch (error) {
+          this.records.delete(id); this.etags.delete(id); this.dirty.delete(id);
+          if (error instanceof StoreConflict && attempt < 5) { await new Promise(r => setTimeout(r, 20 + Math.random() * 80 * (attempt + 1))); continue; }
+          throw error;
+        }
+      }
+      for (const f of scope.after) f();
+      return out;
+    }
   }
 
   // ---------- persistence ----------
@@ -189,7 +283,7 @@ export class SwitchGuardService {
         if (rec.version !== 1) continue;
         this.records.set(rec.session.id, rec);
         // Windows that were pending when the server stopped are retried with the SAME idempotency key.
-        for (const w of rec.session.windows) if (w.coverage === 'pending' && rec.windowOps[w.id]) this.scheduleCheck(rec, w.id);
+        for (const w of rec.session.windows) if (w.coverage === 'pending' && rec.windowOps[w.id]) this.scheduleCheck(rec.session.id, w.id);
       } catch (error) {
         const from = join(this.config.dataDir, 'sessions', file), to = `${from}.corrupt-${Date.now()}`;
         try { renameSync(from, to); } catch { /* leave it in place */ }
@@ -201,12 +295,14 @@ export class SwitchGuardService {
   private save(rec: ProductRecord): void {
     if (this.records.get(rec.session.id) !== rec) return; // deleted meanwhile
     this.dirty.add(rec.session.id);
+    if (this.shared) return;                               // committed by mutate()
     if (this.config.saveDelayMs <= 0) { this.flush(); return; }
     if (!this.flushTimer) { this.flushTimer = setTimeout(() => this.flush(), this.config.saveDelayMs); this.flushTimer.unref?.(); }
   }
   /** Writes every pending session now. A failed write stays pending and is reported by health. */
   flush(): void {
     if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = undefined; }
+    if (this.shared) return;
     for (const id of [...this.dirty]) {
       const rec = this.records.get(id);
       if (!rec) { this.dirty.delete(id); continue; }
@@ -234,33 +330,51 @@ export class SwitchGuardService {
       fail(code === 'ENOSPC' || code === 'EDQUOT' ? 'storage_full' : 'storage_error', code === 'ENOSPC' || code === 'EDQUOT' ? 'The server is out of storage space; the upload was not saved' : 'The server could not store this upload', 507);
     }
     rec.media.push({ ...entry, createdAtEpochMs: this.config.now() });
+    if (this.shared) {
+      const upload = this.shared.putMedia(rec.session.id, entry.name, bytes, CONTENT_TYPES[entry.name.split('.').pop()!] ?? 'application/octet-stream');
+      const scope = this.scope.getStore();
+      if (scope) scope.uploads.push(upload); else this.track(upload.then(() => undefined));
+    }
   }
-  readMedia(rec: ProductRecord, name: string): { bytes: Buffer; contentType: string } {
+  async readMedia(rec: ProductRecord, name: string): Promise<{ bytes: Buffer; contentType: string }> {
     const entry = rec.media.find(m => m.name === name);
     if (!MEDIA_NAME.test(name) || !entry || entry.purgedAtEpochMs !== undefined) fail('not_found', 'Media not found, deleted, or expired under the retention policy', 404);
+    const contentType = CONTENT_TYPES[name.split('.').pop()!] ?? 'application/octet-stream';
     const path = join(this.mediaDir(rec.session.id), name);
-    if (!existsSync(path)) fail('not_found', 'Media file is no longer stored', 404);
-    return { bytes: readFileSync(path), contentType: CONTENT_TYPES[name.split('.').pop()!] ?? 'application/octet-stream' };
+    if (existsSync(path)) return { bytes: readFileSync(path), contentType };
+    const remote = this.shared ? await this.shared.getMedia(rec.session.id, name) : undefined;
+    if (!remote) fail('not_found', 'Media file is no longer stored', 404);
+    return { bytes: remote, contentType };
   }
   private purge(rec: ProductRecord, entry: MediaEntry, reason: NonNullable<MediaEntry['purgeReason']>): void {
     rmSync(join(this.mediaDir(rec.session.id), entry.name), { force: true });
     entry.purgedAtEpochMs = this.config.now(); entry.purgeReason = reason;
+    if (this.shared) { const sid = rec.session.id, store = this.shared; this.later(() => this.track(store.deleteMedia(sid, entry.name).catch(() => undefined))); }
   }
   /** Deletes media older than the retention window. Records of the analysis remain; the audio does not.
    * Entries already removed by the rolling video buffer or thumbnail cap are dropped from the record
    * after 10 minutes (counted in mediaPruned) so long sessions do not grow without bound. */
   sweepRetention(): number {
-    const now = this.config.now(), cutoff = now - this.config.mediaRetentionHours * 3_600_000;
     let purged = 0;
-    for (const rec of this.records.values()) {
-      let changed = false;
-      for (const entry of rec.media) if (entry.purgedAtEpochMs === undefined && entry.createdAtEpochMs < cutoff) { this.purge(rec, entry, 'retention'); purged++; changed = true; }
-      const before = rec.media.length;
-      rec.media = rec.media.filter(m => !(m.purgedAtEpochMs !== undefined && (m.purgeReason === 'video_buffer' || m.purgeReason === 'thumbnail_limit') && now - m.purgedAtEpochMs > 600_000));
-      if (rec.media.length !== before) { rec.mediaPruned = (rec.mediaPruned ?? 0) + before - rec.media.length; changed = true; }
-      if (changed) this.save(rec);
-    }
+    for (const rec of this.records.values()) purged += this.sweepRecord(rec);
     return purged;
+  }
+  private sweepRecord(rec: ProductRecord): number {
+    const now = this.config.now(), cutoff = now - this.config.mediaRetentionHours * 3_600_000;
+    let purged = 0, changed = false;
+    for (const entry of rec.media) if (entry.purgedAtEpochMs === undefined && entry.createdAtEpochMs < cutoff) { this.purge(rec, entry, 'retention'); purged++; changed = true; }
+    const before = rec.media.length;
+    rec.media = rec.media.filter(m => !(m.purgedAtEpochMs !== undefined && (m.purgeReason === 'video_buffer' || m.purgeReason === 'thumbnail_limit') && now - m.purgedAtEpochMs > 600_000));
+    if (rec.media.length !== before) { rec.mediaPruned = (rec.mediaPruned ?? 0) + before - rec.media.length; changed = true; }
+    if (changed) this.save(rec);
+    return purged;
+  }
+  /** Retention sweep across every stored session (cron job in multi-instance mode). */
+  async sweepAll(): Promise<{ purged: number; expired: { deleted: number; failed: number } }> {
+    await this.pullAll();
+    let purged = 0;
+    for (const id of [...this.records.keys()]) purged += (await this.mutate(id, rec => this.sweepRecord(rec), { missing: 'ignore' })) ?? 0;
+    return { purged, expired: await this.expireSessions() };
   }
   /** Deletes whole sessions older than sessionRetentionDays (record, media, remote speaker profile).
    * A failed remote deletion keeps the session and is retried on the next sweep. */
@@ -269,6 +383,7 @@ export class SwitchGuardService {
     if (!(days > 0)) return { deleted: 0, failed: 0 };
     const cutoff = this.config.now() - days * 86_400_000;
     let deleted = 0, failed = 0;
+    await this.pullAll();
     for (const rec of [...this.records.values()]) {
       if (rec.session.createdAtEpochMs >= cutoff) continue;
       if (rec.session.windows.some(w => w.coverage === 'pending')) continue;
@@ -278,14 +393,18 @@ export class SwitchGuardService {
     return { deleted, failed };
   }
   /** Storage, worker and provider state for /api/health (no secrets). */
-  health() {
+  async health() {
     let storage: 'ok' | 'error' = 'ok', detail = this.storageError;
     try { accessSync(join(this.config.dataDir, 'sessions'), fsConstants.W_OK); accessSync(join(this.config.dataDir, 'media'), fsConstants.W_OK); }
     catch (error) { storage = 'error'; detail = `Data directory not writable: ${(error as Error).message}`; }
+    if (this.shared) {
+      try { await this.shared.ping(); } catch (error) { storage = 'error'; detail = `Shared store (${this.shared.name}) unreachable: ${(error as Error).message}`; }
+    }
     if (this.storageError) storage = 'error';
     return { ok: storage === 'ok', storage, storageDetail: detail, pendingSaves: this.dirty.size, sessions: this.records.size,
       uptimeSec: Math.round((Date.now() - this.startedAtEpochMs) / 1000), detectifConfigured: this.client.configured, queue: this.client.queue.stats,
-      voiceWorker: { state: this.voice.state, queued: this.voice.queued, restarts: this.voice.restarts, lastError: this.voice.lastError }, backgroundTasks: this.checks.size };
+      voiceWorker: { state: this.voice.state, queued: this.voice.queued, restarts: this.voice.restarts, lastError: this.voice.lastError }, backgroundTasks: this.checks.size,
+      store: this.shared?.name ?? 'local-disk' };
   }
 
   // ---------- helpers ----------
@@ -499,8 +618,8 @@ export class SwitchGuardService {
       submittedAtMs: coverage === 'pending' ? this.elapsed(rec) : undefined };
     try { rec.session = addWindow(rec.session, window); } catch (error) { fail('invalid_window', (error as Error).message, 409); }
     this.writeMedia(rec, { name: `${id}.wav`, kind: purpose === 'reverify' ? 'challenge' : 'window', atMs: times.startMs, windowId: id }, audio);
-    if (coverage === 'pending') { rec.windowOps[id] = `${rec.session.id}:${id}`; this.scheduleCheck(rec, id); }
-    if (purpose === 'monitor' && rec.voiceProfile && voiced >= 2) this.track(this.voiceScan(rec, id));
+    if (coverage === 'pending') { rec.windowOps[id] = `${rec.session.id}:${id}`; this.scheduleCheck(rec.session.id, id); }
+    if (purpose === 'monitor' && rec.voiceProfile && voiced >= 2) { const sid = rec.session.id; this.later(() => this.track(this.voiceScan(sid, id))); }
     this.save(rec);
     return { windowId: id, coverage, reason };
   }
@@ -513,27 +632,35 @@ export class SwitchGuardService {
   /** Scans one window (joined to the tail of the previous contiguous window, so switches across a
    * boundary are seen) for stretches that do not sound like the reference, then checks exactly
    * those stretches with DetectifAI. Only DetectifAI results become evidence. */
-  private async voiceScan(rec: ProductRecord, windowId: string): Promise<void> {
+  private async voiceScan(sessionId: string, windowId: string): Promise<void> {
     await new Promise(r => setImmediate(r));                      // let the upload response go first
-    const w = rec.session.windows.find(x => x.id === windowId), profile = rec.voiceProfile;
-    if (!w || !profile || this.records.get(rec.session.id) !== rec) return;
-    const meta = rec.windowMeta ?? (rec.windowMeta = {});
+    // 1. Read a snapshot and run the (slow) analysis outside any write.
+    const snap = this.shared ? await this.pull(sessionId) : this.records.get(sessionId);
+    const w = snap?.session.windows.find(x => x.id === windowId), profile = snap?.voiceProfile;
+    if (!snap || !w || !profile) return;
+    const meta = snap.windowMeta ?? {};
     let current: Uint8Array;
-    try { current = new Uint8Array(this.readMedia(rec, `${w.id}.wav`).bytes); } catch { return; }
-    const prev = rec.session.windows
+    try { current = new Uint8Array((await this.readMedia(snap, `${w.id}.wav`)).bytes); } catch { return; }
+    const prev = snap.session.windows
       .filter(x => x.purpose === 'monitor' && x.id !== w.id && !meta[x.id]?.targetedFrom && Math.abs(w.startMs - x.endMs) <= 300)
       .sort((a, b) => b.endMs - a.endMs)[0];
     const inputs: Array<{ wav: Uint8Array; sampleRate: number; tailSec?: number }> = [];
-    if (prev) { try { inputs.push({ wav: new Uint8Array(this.readMedia(rec, `${prev.id}.wav`).bytes), sampleRate: prev.sampleRate, tailSec: 4 }); } catch { /* previous audio purged */ } }
+    if (prev) { try { inputs.push({ wav: new Uint8Array((await this.readMedia(snap, `${prev.id}.wav`)).bytes), sampleRate: prev.sampleRate, tailSec: 4 }); } catch { /* previous audio purged */ } }
     inputs.push({ wav: current, sampleRate: w.sampleRate });
-    let result: Awaited<ReturnType<VoicePool['analyse']>>;
+    let result: AnalyseResult;
     try { result = await this.voice.analyse(inputs, profile); }
     catch (error) {
-      rec.voiceScanSkipped = (rec.voiceScanSkipped ?? 0) + 1; this.save(rec);
-      console.error(`Voice screening skipped for ${rec.session.id}/${w.id}: ${(error as Error).message}`);
+      console.error(`Voice screening skipped for ${sessionId}/${w.id}: ${(error as Error).message}`);
+      await this.mutate(sessionId, rec => { rec.voiceScanSkipped = (rec.voiceScanSkipped ?? 0) + 1; this.save(rec); }, { missing: 'ignore' });
       return;
     }
-    if (this.records.get(rec.session.id) !== rec || !rec.session.windows.some(x => x.id === w.id)) return;
+    // 2. Apply the outcome to the latest copy (replayed on the fresh copy if another write won).
+    await this.mutate(sessionId, rec => this.applyVoiceScan(rec, windowId, prev?.id, result), { missing: 'ignore' });
+  }
+  private applyVoiceScan(rec: ProductRecord, windowId: string, prevId: string | undefined, result: AnalyseResult): void {
+    const w = rec.session.windows.find(x => x.id === windowId), profile = rec.voiceProfile;
+    if (!w || !profile) return;
+    if ((rec.speakerSlices ?? []).some(sl => sl.s >= w.startMs && sl.e <= w.endMs)) return;   // already applied (replay)
     const buffer = result.buffer, bufferStartMs = w.startMs - result.prefixSec * 1000;
     // Who is speaking: label each slice of THIS window (the previous tail was labelled last time).
     const own = result.slices.filter(sl => (sl.startSec + sl.endSec) / 2 >= result.prefixSec);
@@ -551,7 +678,7 @@ export class SwitchGuardService {
       // The boundary pass re-reads the previous tail: skip stretches already reported.
       if (signals.some(o => o.kind === sig.kind && Math.min(o.endMs, endMs) - Math.max(o.startMs, startMs) > 0.5 * (endMs - startMs))) continue;
       const record: VoiceSignalRecord = { id: `vs${signals.length + 1}`, kind: sig.kind, startMs, endMs, strength: Math.round(sig.strength * 100) / 100, detail: sig.detail,
-        windowIds: [prev && startMs < w.startMs ? prev.id : undefined, w.id].filter((x): x is string => !!x), atMs: this.elapsed(rec) };
+        windowIds: [prevId && startMs < w.startMs ? prevId : undefined, w.id].filter((x): x is string => !!x), atMs: this.elapsed(rec) };
       signals.push(record);
       if ((rec.targetedChecks ?? 0) >= this.config.maxTargetedChecks) { record.targetedSkipped = `Targeted-check budget (${this.config.maxTargetedChecks} per session) used up — listen to this stretch`; continue; }
       if (typeof this.lastBalance === 'number' && this.lastBalance < this.config.lowCreditThreshold) { record.targetedSkipped = `DetectifAI credits are low (${this.lastBalance} left) — targeted check skipped; listen to this stretch`; continue; }
@@ -577,32 +704,39 @@ export class SwitchGuardService {
     this.writeMedia(rec, { name: `${id}.wav`, kind: 'window', atMs: times.startMs, windowId: id }, wavBytes);
     (rec.windowMeta ??= {})[id] = { targetedFrom: signal.windowIds, signalId: signal.id };
     rec.windowOps[id] = `${rec.session.id}:${id}`;
-    this.scheduleCheck(rec, id);
+    this.scheduleCheck(rec.session.id, id);
     return id;
   }
-  private scheduleCheck(rec: ProductRecord, windowId: string): void {
-    const p = this.runCheck(rec, windowId).catch(error => console.error('check failed unexpectedly', error)).finally(() => this.checks.delete(p));
-    this.checks.add(p);
+  /** Starts the DetectifAI check for a window once the change that created it is committed. */
+  private scheduleCheck(sessionId: string, windowId: string): void {
+    this.later(() => {
+      const p = this.runCheck(sessionId, windowId).catch(error => console.error('check failed unexpectedly', error)).finally(() => this.checks.delete(p));
+      this.checks.add(p);
+    });
   }
-  /** Waits for all background checks (tests and graceful shutdown). */
+  /** Waits for all background checks (tests, graceful shutdown, Vercel waitUntil). */
   async idle(): Promise<void> { while (this.checks.size) await Promise.allSettled([...this.checks]); this.flush(); }
-  private async runCheck(rec: ProductRecord, windowId: string): Promise<void> {
-    const window = rec.session.windows.find(w => w.id === windowId);
-    const reference = rec.session.enrollment;
-    if (!window || !reference) return;
-    let result: WindowResult;
+  private async runCheck(sessionId: string, windowId: string): Promise<void> {
+    const snap = this.shared ? await this.pull(sessionId) : this.records.get(sessionId);
+    const window = snap?.session.windows.find(w => w.id === windowId);
+    const reference = snap?.session.enrollment;
+    if (!snap || !window || !reference || window.coverage !== 'pending' || snap.session.results.some(r => r.windowId === windowId)) return;
+    let result: WindowResult, body: Record<string, any> | undefined;
     try {
-      const audio = this.readMedia(rec, `${windowId}.wav`).bytes;
-      const response = await this.client.verify(reference.speakerId, new Uint8Array(audio), rec.windowOps[windowId]);
-      this.countUsage(rec, response.body);
-      result = normalizeCombined(response, window, this.resultTime(rec));
+      const audio = (await this.readMedia(snap, `${windowId}.wav`)).bytes;
+      const response = await this.client.verify(reference.speakerId, new Uint8Array(audio), snap.windowOps[windowId]);
+      body = response.body;
+      result = normalizeCombined(response, window, this.resultTime(snap));
     } catch (error) {
-      result = failedResult(window, this.resultTime(rec), error);
+      result = failedResult(window, this.resultTime(snap), error);
     }
-    if (this.records.get(rec.session.id) !== rec || !rec.session.windows.some(w => w.id === windowId)) return;
     result.provenance = this.config.provenance;
-    rec.session = applyResult(rec.session, result);
-    this.save(rec);
+    await this.mutate(sessionId, rec => {
+      if (!rec.session.windows.some(w => w.id === windowId) || rec.session.results.some(r => r.windowId === windowId)) return;
+      if (body) this.countUsage(rec, body);
+      rec.session = applyResult(rec.session, result);
+      this.save(rec);
+    }, { missing: 'ignore' });
   }
   /** Interview: wall-clock session time. Sandbox: file timeline + processing time, so latency stays measurable. */
   private resultTime(rec: ProductRecord): number { return this.elapsed(rec); }
@@ -934,6 +1068,7 @@ export class SwitchGuardService {
   async deleteSession(rec: ProductRecord): Promise<void> {
     // Also covers an enrollment that may have succeeded remotely after a local timeout.
     if (rec.session.enrollment?.deletedAtMs === undefined) await this.deleteRemoteSpeaker(rec);
+    if (this.shared) { await this.shared.deleteSessionMedia(rec.session.id); await this.shared.deleteRecord(rec.session.id); this.etags.delete(rec.session.id); }
     this.records.delete(rec.session.id); this.dirty.delete(rec.session.id); this.presence.delete(rec.session.id);
     rmSync(this.mediaDir(rec.session.id), { recursive: true, force: true });
     rmSync(join(this.config.dataDir, 'sessions', `${rec.session.id}.json`), { force: true });

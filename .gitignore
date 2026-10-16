@@ -12,3 +12,5 @@ dist/
 # Local tooling and screenshots (not part of the app)
 .claude/
 artifacts/
+vercel-out/
+.vercel/

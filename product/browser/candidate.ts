@@ -11,7 +11,8 @@ const ENROLL_PARAGRAPH =
   'has started serving. On quiet days the staff sort returned books, repair torn covers, and plan small exhibitions about ' +
   'local history. Children usually head straight for the picture books, while older readers settle near the tall windows ' +
   'overlooking the garden and the old stone bridge.';
-const ENROLL_TARGET_SEC = 20, ENROLL_MIN_SEC = 15, ENROLL_MAX_SEC = 60;
+// 40 s cap: within DetectifAI's 15–60 s and under hosted upload limits (4.5 MB at 48 kHz).
+const ENROLL_TARGET_SEC = 20, ENROLL_MIN_SEC = 15, ENROLL_MAX_SEC = 40;
 const CHALLENGE_TARGET_SEC = 8, CHALLENGE_MIN_SEC = 5;
 const POLL_MS = 1500, THUMB_MS = 3000, MAX_RETRIES = 3;
 

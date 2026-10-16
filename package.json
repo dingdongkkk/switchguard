@@ -23,6 +23,8 @@
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "1.0.1",
+    "@vercel/blob": "2.8.0",
+    "@vercel/functions": "3.9.9",
     "three": "^0.186.1"
   }
 }

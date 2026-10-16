@@ -46,7 +46,7 @@ const form = el('form', {},
   el('label', {}, 'Scenario ', scenario),
   el('label', {}, 'Expected label (display only) ', label),
   el('label', {}, 'Notes', notes),
-  el('label', {}, 'Reference audio — 15–60 s of the genuine speaker ', refFile),
+  el('label', {}, 'Reference audio — 15–40 s of the genuine speaker ', refFile),
   el('label', {}, 'Test audio ', testFile),
   el('label', {}, 'Switch onset, seconds into the test file (optional) ', onset),
   runButton);
@@ -119,7 +119,9 @@ form.addEventListener('submit', async (event) => {
     step('Decoding audio in the browser…');
     const [refAudio, testAudio] = await Promise.all([decodeMono(ref), decodeMono(test)]);
     step(`Reference ${fmtSec(refAudio.durationMs)} @ ${refAudio.sampleRate} Hz · test ${fmtSec(testAudio.durationMs)} @ ${testAudio.sampleRate} Hz`);
-    if (refAudio.durationMs < 15_000 || refAudio.durationMs > 60_000) throw new Error('Reference audio must be 15–60 s long (enrollment requirement). Nothing was sent.');
+    // Uploads are capped at ~4 MB on hosted deployments: 16-bit audio allows fewer seconds at higher rates.
+    const maxRefSec = Math.min(60, Math.floor(4_000_000 / (2 * refAudio.sampleRate)));
+    if (refAudio.durationMs < 15_000 || refAudio.durationMs > maxRefSec * 1000) throw new Error(`Reference audio must be 15–${maxRefSec} s long at ${refAudio.sampleRate} Hz (enrollment needs ≥15 s; uploads are limited to about 4 MB). Nothing was sent.`);
 
     const created = await api.createSession(auth, {
       displayName: `Sandbox ${s.title}`, kind: 'sandbox',

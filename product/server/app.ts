@@ -20,6 +20,8 @@ export interface AppOptions {
   trustProxy?: boolean;
   /** One JSON line per API request (no tokens, keys or query strings). */
   accessLog?: boolean;
+  /** Shared secret for the scheduled housekeeping route (Vercel Cron). */
+  cronSecret?: string;
   /** Per-IP limits; tests lower them. */
   limits?: { burst?: number; perSecond?: number; reviewerFailures?: number; lockoutMs?: number };
 }
@@ -71,12 +73,13 @@ async function json(req: IncomingMessage): Promise<Record<string, any>> {
 function captureMeta(req: IncomingMessage): Record<string, any> {
   try { return object(JSON.parse(decodeURIComponent(String(req.headers['x-capture-metadata'] ?? '')))); } catch { return fail('invalid_metadata', 'Missing or invalid X-Capture-Metadata header'); }
 }
+interface Reply { status: number; body?: unknown; raw?: Buffer; headers?: Record<string, string> }
 function send(res: ServerResponse, status: number, value: unknown, headers: Record<string, string> = {}): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers });
   res.end(JSON.stringify(value));
 }
 
-export function createProductApp(service: SwitchGuardService, options: AppOptions) {
+export function createRequestHandler(service: SwitchGuardService, options: AppOptions) {
   const allowed = new Set((options.allowedHosts ?? []).map(h => h.toLowerCase()));
   const publicDir = resolve(options.root, 'product/public');
   const distDir = resolve(options.root, 'product/dist');
@@ -122,7 +125,7 @@ export function createProductApp(service: SwitchGuardService, options: AppOption
     } catch { return false; }
   }
 
-  const server = createServer(async (req, res) => {
+  async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const started = Date.now(), ip = clientIp(req);
     if (options.accessLog) res.on('finish', () => {
       const path = (req.url ?? '').split('?')[0]!;
@@ -153,109 +156,128 @@ export function createProductApp(service: SwitchGuardService, options: AppOption
         if (method === 'GET' && await serveStatic(res, path)) return;
         fail('not_found', 'Not found', 404);
       }
-      if (path === '/api/health' && method === 'GET') { const h = service.health(); send(res, h.ok ? 200 : 503, h); return; }
-      if (path === '/api/ops' && method === 'GET') { reviewer(req); send(res, 200, await service.ops()); return; }
-      if (path === '/api/sessions' && method === 'GET') { reviewer(req); send(res, 200, { sessions: service.summaries() }); return; }
+      if (path === '/api/health' && method === 'GET') { const h = await service.health(); send(res, h.ok ? 200 : 503, h); return; }
+      // Scheduled housekeeping (Vercel Cron sends "Authorization: Bearer $CRON_SECRET").
+      if (path === '/api/cron/sweep' && method === 'GET') {
+        if (!options.cronSecret || !equal(String(req.headers.authorization ?? ''), `Bearer ${options.cronSecret}`)) fail('unauthorized', 'Cron secret required', 401);
+        send(res, 200, await service.sweepAll()); return;
+      }
+      if (path === '/api/ops' && method === 'GET') { reviewer(req); await service.pullAll(); send(res, 200, await service.ops()); return; }
+      if (path === '/api/sessions' && method === 'GET') { reviewer(req); await service.pullAll(); send(res, 200, { sessions: service.summaries() }); return; }
       if (path === '/api/sessions' && method === 'POST') {
         reviewer(req);
         const rec = service.createSession(await json(req));
+        await service.persistNew(rec.session.id);
         const view = service.reviewerView(rec);
         send(res, 201, { sessionId: rec.session.id, candidateKey: rec.candidateKey, candidateUrl: view.candidateUrl, view }); return;
       }
       const m = /^\/api\/sessions\/([a-f0-9]{24})(\/.*)?$/.exec(path);
       if (!m) fail('not_found', 'Route not found', 404);
       const id = m[1]!, sub = m[2] ?? '';
-      const op = () => String(req.headers['x-operation-id'] ?? '');
-      const audio = async () => {
-        if (req.headers['content-type'] !== 'audio/wav') fail('unsupported_media', 'Send canonical mono PCM16 audio/wav from the capture module', 415);
-        return new Uint8Array(await readBody(req, MAX_AUDIO));
-      };
-      let r: RegExpExecArray | null;
+      const route = async (): Promise<Reply> => {
+        const op = () => String(req.headers['x-operation-id'] ?? '');
+        // The body is read once and memoised: a write that loses a race with another instance is replayed.
+        let bodyCache: Buffer | undefined;
+        const bodyOnce = async (limit: number) => bodyCache ??= await readBody(req, limit);
+        const jsonOnce = async (): Promise<Record<string, any>> => {
+          const bytes = await bodyOnce(64 * 1024);
+          if (!bytes.length) return {};
+          try { return object(JSON.parse(bytes.toString('utf8'))); } catch { return fail('invalid_json', 'Invalid JSON body'); }
+        };
+        const audio = async () => {
+          if (req.headers['content-type'] !== 'audio/wav') fail('unsupported_media', 'Send canonical mono PCM16 audio/wav from the capture module', 415);
+          return new Uint8Array(await bodyOnce(MAX_AUDIO));
+        };
+        let r: RegExpExecArray | null;
 
-      if (sub === '' && method === 'GET') { const rec = session(req, id, 'reviewer'); service.touch(rec, 'reviewer'); send(res, 200, service.reviewerView(rec)); return; }
-      if (sub === '/join' && method === 'POST') { const rec = session(req, id, 'reviewer'); service.join(rec, await json(req)); send(res, 200, service.reviewerView(rec)); return; }
-      if (sub === '/review-requests' && method === 'POST') {
-        const rec = session(req, id, 'either'), body = await json(req);
-        const asCandidate = isCandidate(req, rec);
-        service.createReviewRequest(rec, { requestedBy: asCandidate ? 'candidate' : 'reviewer', reason: body.reason, requesterName: asCandidate ? undefined : (typeof body.reviewerId === 'string' ? body.reviewerId.slice(0, 128) : undefined) });
-        send(res, 200, asCandidate ? service.candidateView(rec) : service.reviewerView(rec)); return;
-      }
-      if ((r = /^\/review-requests\/([A-Za-z0-9-]+)\/versions$/.exec(sub)) && method === 'POST') {
-        const rec = session(req, id, 'either'); await json(req);
-        const asCandidate = isCandidate(req, rec);
-        service.newVersion(rec, r[1]!, asCandidate ? 'candidate' : 'reviewer');
-        send(res, 200, asCandidate ? service.candidateView(rec) : service.reviewerView(rec)); return;
-      }
-      if (sub === '/gestures' && method === 'POST') { const rec = session(req, id, 'reviewer'); service.requestGesture(rec, await json(req)); send(res, 200, service.reviewerView(rec)); return; }
-      if ((r = /^\/gestures\/([A-Za-z0-9-]+)\/report$/.exec(sub)) && method === 'POST') {
-        const rec = session(req, id, 'candidate');
-        const raw = await readBody(req, 400 * 1024);
-        let body: Record<string, any>;
-        try { body = object(JSON.parse(raw.toString('utf8'))); } catch { fail('invalid_json', 'Invalid JSON body'); }
-        service.reportGesture(rec, r[1]!, body); send(res, 200, service.candidateView(rec)); return;
-      }
-      if ((r = /^\/review-requests\/([A-Za-z0-9-]+)\/close$/.exec(sub)) && method === 'POST') {
-        const rec = session(req, id, 'reviewer'); service.closeReviewRequest(rec, r[1]!, await json(req)); send(res, 200, service.reviewerView(rec)); return;
-      }
-      if (sub === '' && method === 'DELETE') { await service.deleteSession(session(req, id, 'reviewer')); send(res, 200, { deleted: true }); return; }
-      if (sub === '/candidate' && method === 'GET') { const rec = session(req, id, 'candidate'); service.touch(rec, 'candidate'); send(res, 200, service.candidateView(rec)); return; }
-      if (sub === '/clock' && method === 'GET') { const rec = session(req, id, 'either'); send(res, 200, { sessionMs: service.elapsed(rec) }); return; }
-      if (sub === '/consent' && method === 'POST') { const rec = session(req, id, 'candidate_or_sandbox_reviewer'); service.consent(rec, await json(req)); send(res, 200, service.candidateView(rec)); return; }
-      if (sub === '/enrollment' && method === 'POST') {
-        const rec = session(req, id, 'candidate_or_sandbox_reviewer');
-        const bytes = await audio(), meta = captureMeta(req);   // content type is checked first
-        send(res, 200, await service.enroll(rec, bytes, meta, op())); return;
-      }
-      if (sub === '/control' && method === 'POST') { const rec = session(req, id, 'either'); service.control(rec, (await json(req)).action); send(res, 200, service.candidateView(rec)); return; }
-      if (sub === '/answers/start' && method === 'POST') { const rec = session(req, id, 'either'); service.startAnswer(rec, (await json(req)).questionId); send(res, 200, service.candidateView(rec)); return; }
-      if (sub === '/answers/end' && method === 'POST') { const rec = session(req, id, 'either'); await json(req); service.endAnswer(rec); send(res, 200, service.candidateView(rec)); return; }
-      if (sub === '/windows' && method === 'POST') {
-        const rec = session(req, id, 'candidate_or_sandbox_reviewer');
-        const bytes = await audio(), meta = captureMeta(req);   // content type is checked first
-        send(res, 202, await service.submitWindow(rec, bytes, meta, op())); return;
-      }
-      if (sub === '/interruptions' && method === 'POST') { const rec = session(req, id, 'candidate'); service.candidateInterruption(rec, await json(req)); send(res, 200, { ok: true }); return; }
-      if (sub === '/thumbnails' && method === 'POST') {
-        const rec = session(req, id, 'candidate');
-        if (req.headers['content-type'] !== 'image/jpeg') fail('unsupported_media', 'Thumbnails must be image/jpeg', 415);
-        service.addThumbnail(rec, new Uint8Array(await readBody(req, 200_000)), req.headers['x-at-ms']); send(res, 200, { ok: true }); return;
-      }
-      if (sub === '/video' && method === 'POST') {
-        const rec = session(req, id, 'candidate');
-        const meta = captureMeta(req);
-        send(res, 200, service.addVideoClip(rec, new Uint8Array(await readBody(req, 4 * 1024 * 1024)), meta, req.headers['content-type'])); return;
-      }
-      if ((r = /^\/evidence\/([^/]+)\/context$/.exec(sub)) && method === 'GET') {
-        const rec = session(req, id, 'reviewer');
-        const evidence = rec.session.evidence.find(e => e.id === decodeURIComponent(r![1]!));
-        if (!evidence) fail('not_found', 'Evidence not found', 404);
-        send(res, 200, service.videoContext(rec, evidence)); return;
-      }
-      if ((r = /^\/media\/([A-Za-z0-9.-]+)$/.exec(sub)) && method === 'GET') {
-        const rec = session(req, id, 'reviewer');
-        const media = service.readMedia(rec, r[1]!);
-        res.writeHead(200, { 'content-type': media.contentType, 'cache-control': 'no-store, private', 'content-disposition': 'inline' });
-        res.end(media.bytes); return;
-      }
-      if ((r = /^\/evidence\/([^/]+)\/resolutions$/.exec(sub)) && method === 'POST') {
-        const rec = session(req, id, 'reviewer'); service.resolve(rec, decodeURIComponent(r[1]!), await json(req)); send(res, 200, service.reviewerView(rec)); return;
-      }
-      // Kept for compatibility: a reviewer-issued phrase is always tracked as a re-evaluation request.
-      if (sub === '/challenges' && method === 'POST') { const rec = session(req, id, 'reviewer'); const body = await json(req); service.createReviewRequest(rec, { requestedBy: 'reviewer', reason: body.reason }); send(res, 200, service.reviewerView(rec)); return; }
-      if ((r = /^\/challenges\/([A-Za-z0-9-]+)\/submit$/.exec(sub)) && method === 'POST') {
-        const rec = session(req, id, 'candidate');
-        const bytes = await audio(), meta = captureMeta(req);   // content type is checked first
-        send(res, 200, await service.submitChallenge(rec, r[1]!, bytes, meta, req.headers['x-transcript'], op())); return;
-      }
-      if ((r = /^\/challenges\/([A-Za-z0-9-]+)\/assist$/.exec(sub)) && method === 'POST') {
-        const rec = session(req, id, 'reviewer'); service.assistChallenge(rec, r[1]!, await json(req)); send(res, 200, service.reviewerView(rec)); return;
-      }
-      if (sub === '/export' && method === 'GET') {
-        const rec = session(req, id, 'reviewer');
-        send(res, 200, service.exportSession(rec), { 'content-disposition': `attachment; filename="switchguard-${id}.json"` }); return;
-      }
-      if (sub === '/profile' && method === 'DELETE') { const rec = session(req, id, 'reviewer'); await service.deleteProfile(rec); send(res, 200, service.reviewerView(rec)); return; }
-      fail('method_not_allowed', 'Unsupported route or method', 405);
+        if (sub === '' && method === 'GET') { const rec = session(req, id, 'reviewer'); service.touch(rec, 'reviewer'); return { status: 200, body: service.reviewerView(rec) }; }
+        if (sub === '/join' && method === 'POST') { const rec = session(req, id, 'reviewer'); service.join(rec, await jsonOnce()); return { status: 200, body: service.reviewerView(rec) }; }
+        if (sub === '/review-requests' && method === 'POST') {
+          const rec = session(req, id, 'either'), body = await jsonOnce();
+          const asCandidate = isCandidate(req, rec);
+          service.createReviewRequest(rec, { requestedBy: asCandidate ? 'candidate' : 'reviewer', reason: body.reason, requesterName: asCandidate ? undefined : (typeof body.reviewerId === 'string' ? body.reviewerId.slice(0, 128) : undefined) });
+          return { status: 200, body: asCandidate ? service.candidateView(rec) : service.reviewerView(rec) };
+        }
+        if ((r = /^\/review-requests\/([A-Za-z0-9-]+)\/versions$/.exec(sub)) && method === 'POST') {
+          const rec = session(req, id, 'either'); await jsonOnce();
+          const asCandidate = isCandidate(req, rec);
+          service.newVersion(rec, r[1]!, asCandidate ? 'candidate' : 'reviewer');
+          return { status: 200, body: asCandidate ? service.candidateView(rec) : service.reviewerView(rec) };
+        }
+        if (sub === '/gestures' && method === 'POST') { const rec = session(req, id, 'reviewer'); service.requestGesture(rec, await jsonOnce()); return { status: 200, body: service.reviewerView(rec) }; }
+        if ((r = /^\/gestures\/([A-Za-z0-9-]+)\/report$/.exec(sub)) && method === 'POST') {
+          const rec = session(req, id, 'candidate');
+          const raw = await bodyOnce(400 * 1024);
+          let body: Record<string, any>;
+          try { body = object(JSON.parse(raw.toString('utf8'))); } catch { fail('invalid_json', 'Invalid JSON body'); }
+          service.reportGesture(rec, r[1]!, body); return { status: 200, body: service.candidateView(rec) };
+        }
+        if ((r = /^\/review-requests\/([A-Za-z0-9-]+)\/close$/.exec(sub)) && method === 'POST') {
+          const rec = session(req, id, 'reviewer'); service.closeReviewRequest(rec, r[1]!, await jsonOnce()); return { status: 200, body: service.reviewerView(rec) };
+        }
+        if (sub === '' && method === 'DELETE') { await service.deleteSession(session(req, id, 'reviewer')); return { status: 200, body: { deleted: true } }; }
+        if (sub === '/candidate' && method === 'GET') { const rec = session(req, id, 'candidate'); service.touch(rec, 'candidate'); return { status: 200, body: service.candidateView(rec) }; }
+        if (sub === '/clock' && method === 'GET') { const rec = session(req, id, 'either'); return { status: 200, body: { sessionMs: service.elapsed(rec) } }; }
+        if (sub === '/consent' && method === 'POST') { const rec = session(req, id, 'candidate_or_sandbox_reviewer'); service.consent(rec, await jsonOnce()); return { status: 200, body: service.candidateView(rec) }; }
+        if (sub === '/enrollment' && method === 'POST') {
+          const rec = session(req, id, 'candidate_or_sandbox_reviewer');
+          const bytes = await audio(), meta = captureMeta(req);   // content type is checked first
+          return { status: 200, body: await service.enroll(rec, bytes, meta, op()) };
+        }
+        if (sub === '/control' && method === 'POST') { const rec = session(req, id, 'either'); service.control(rec, (await jsonOnce()).action); return { status: 200, body: service.candidateView(rec) }; }
+        if (sub === '/answers/start' && method === 'POST') { const rec = session(req, id, 'either'); service.startAnswer(rec, (await jsonOnce()).questionId); return { status: 200, body: service.candidateView(rec) }; }
+        if (sub === '/answers/end' && method === 'POST') { const rec = session(req, id, 'either'); await jsonOnce(); service.endAnswer(rec); return { status: 200, body: service.candidateView(rec) }; }
+        if (sub === '/windows' && method === 'POST') {
+          const rec = session(req, id, 'candidate_or_sandbox_reviewer');
+          const bytes = await audio(), meta = captureMeta(req);   // content type is checked first
+          return { status: 202, body: await service.submitWindow(rec, bytes, meta, op()) };
+        }
+        if (sub === '/interruptions' && method === 'POST') { const rec = session(req, id, 'candidate'); service.candidateInterruption(rec, await jsonOnce()); return { status: 200, body: { ok: true } }; }
+        if (sub === '/thumbnails' && method === 'POST') {
+          const rec = session(req, id, 'candidate');
+          if (req.headers['content-type'] !== 'image/jpeg') fail('unsupported_media', 'Thumbnails must be image/jpeg', 415);
+          service.addThumbnail(rec, new Uint8Array(await bodyOnce(200_000)), req.headers['x-at-ms']); return { status: 200, body: { ok: true } };
+        }
+        if (sub === '/video' && method === 'POST') {
+          const rec = session(req, id, 'candidate');
+          const meta = captureMeta(req);
+          return { status: 200, body: service.addVideoClip(rec, new Uint8Array(await bodyOnce(4 * 1024 * 1024)), meta, req.headers['content-type']) };
+        }
+        if ((r = /^\/evidence\/([^/]+)\/context$/.exec(sub)) && method === 'GET') {
+          const rec = session(req, id, 'reviewer');
+          const evidence = rec.session.evidence.find(e => e.id === decodeURIComponent(r![1]!));
+          if (!evidence) fail('not_found', 'Evidence not found', 404);
+          return { status: 200, body: service.videoContext(rec, evidence) };
+        }
+        if ((r = /^\/media\/([A-Za-z0-9.-]+)$/.exec(sub)) && method === 'GET') {
+          const rec = session(req, id, 'reviewer');
+          const media = await service.readMedia(rec, r[1]!);
+          return { status: 200, raw: media.bytes, headers: { 'content-type': media.contentType, 'cache-control': 'no-store, private', 'content-disposition': 'inline' } };
+        }
+        if ((r = /^\/evidence\/([^/]+)\/resolutions$/.exec(sub)) && method === 'POST') {
+          const rec = session(req, id, 'reviewer'); service.resolve(rec, decodeURIComponent(r[1]!), await jsonOnce()); return { status: 200, body: service.reviewerView(rec) };
+        }
+        // Kept for compatibility: a reviewer-issued phrase is always tracked as a re-evaluation request.
+        if (sub === '/challenges' && method === 'POST') { const rec = session(req, id, 'reviewer'); const body = await jsonOnce(); service.createReviewRequest(rec, { requestedBy: 'reviewer', reason: body.reason }); return { status: 200, body: service.reviewerView(rec) }; }
+        if ((r = /^\/challenges\/([A-Za-z0-9-]+)\/submit$/.exec(sub)) && method === 'POST') {
+          const rec = session(req, id, 'candidate');
+          const bytes = await audio(), meta = captureMeta(req);   // content type is checked first
+          return { status: 200, body: await service.submitChallenge(rec, r[1]!, bytes, meta, req.headers['x-transcript'], op()) };
+        }
+        if ((r = /^\/challenges\/([A-Za-z0-9-]+)\/assist$/.exec(sub)) && method === 'POST') {
+          const rec = session(req, id, 'reviewer'); service.assistChallenge(rec, r[1]!, await jsonOnce()); return { status: 200, body: service.reviewerView(rec) };
+        }
+        if (sub === '/export' && method === 'GET') {
+          const rec = session(req, id, 'reviewer');
+          return { status: 200, body: service.exportSession(rec), headers: { 'content-disposition': `attachment; filename="switchguard-${id}.json"` } };
+        }
+        if (sub === '/profile' && method === 'DELETE') { const rec = session(req, id, 'reviewer'); await service.deleteProfile(rec); return { status: 200, body: service.reviewerView(rec) }; }
+        return fail('method_not_allowed', 'Unsupported route or method', 405);
+      };
+      // Reads see the latest stored copy; writes are applied to it and replayed if another instance won.
+      const reply = method === 'GET' ? (await service.pull(id), await route()) : (await service.mutate(id, route))!;
+      if (reply.raw) { res.writeHead(reply.status, reply.headers); res.end(reply.raw); return; }
+      send(res, reply.status, reply.body, reply.headers);
     } catch (error) {
       const e = error instanceof PipelineError ? error : new PipelineError('internal_error', 'Unexpected server error', 500);
       if (!(error instanceof PipelineError)) console.error(error);
@@ -268,7 +290,14 @@ export function createProductApp(service: SwitchGuardService, options: AppOption
       }
       if (!res.headersSent) send(res, e.status, { error: { code: e.code, message: e.message } }); else res.end();
     }
-  });
+  }
+  return handle;
+}
+
+/** Long-running Node server (local and container hosting). */
+export function createProductApp(service: SwitchGuardService, options: AppOptions) {
+  const handle = createRequestHandler(service, options);
+  const server = createServer((req, res) => { void handle(req, res); });
   server.requestTimeout = 180_000; server.headersTimeout = 15_000;
   server.keepAliveTimeout = 65_000;   // longer than typical load-balancer idle timeouts
   return server;
