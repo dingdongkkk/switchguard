@@ -63,6 +63,12 @@ async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   if (Number.isFinite(declared) && declared > limit) fail('payload_too_large', 'Request body is too large', 413);
   const chunks: Buffer[] = []; let size = 0;
   for await (const chunk of req) { size += chunk.length; if (size > limit) fail('payload_too_large', 'Request body is too large', 413); chunks.push(chunk); }
+  if (!chunks.length) {
+    // Some hosts (Vercel's Node helpers) buffer the body before the handler runs; use their copy.
+    const pre = (req as { body?: unknown }).body;
+    const buf = Buffer.isBuffer(pre) ? pre : typeof pre === 'string' ? Buffer.from(pre) : pre && typeof pre === 'object' ? Buffer.from(JSON.stringify(pre)) : undefined;
+    if (buf) { if (buf.length > limit) fail('payload_too_large', 'Request body is too large', 413); return buf; }
+  }
   return Buffer.concat(chunks);
 }
 async function json(req: IncomingMessage): Promise<Record<string, any>> {

@@ -165,3 +165,9 @@ test('health reports the shared store; the cron sweep needs its secret', async (
   assert.equal(swept.status, 200);
   assert.deepEqual(swept.body.expired, { deleted: 0, failed: 0 });
 });
+
+test('weak ETags (W/"…") from compressed reads are normalised for conditional writes', async () => {
+  const { strongEtag } = await import('../server/store.js');
+  assert.equal(strongEtag('W/"abc"'), '"abc"');
+  assert.equal(strongEtag('"abc"'), '"abc"');
+});

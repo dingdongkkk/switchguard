@@ -11,7 +11,7 @@ import { encodeWav, inspectWav } from '../../src/media/wav.js';
 import { assignSpeakers, type SpeakerCluster, type VoiceProfile } from './voice-analysis.js';
 import { VoicePool, type AnalyseResult } from './voice-pool.js';
 import { analyse, buildProfile, wavTo16k } from './voice-analysis.js';
-import { StoreConflict, type SharedStore } from './store.js';
+import { StoreConflict, strongEtag, type SharedStore } from './store.js';
 
 /** Voice analysis runner: a worker thread on a long-running server, inline on serverless functions. */
 export interface VoiceRunner {
@@ -222,8 +222,9 @@ export class SwitchGuardService {
     if (!this.shared) return this.records.get(id);
     const stored = await this.shared.getRecord(id);
     if (!stored) { this.records.delete(id); this.etags.delete(id); return undefined; }
-    if (this.etags.get(id) !== stored.etag || !this.records.has(id)) {
-      this.records.set(id, JSON.parse(stored.json) as ProductRecord); this.etags.set(id, stored.etag);
+    const etag = strongEtag(stored.etag);
+    if (this.etags.get(id) !== etag || !this.records.has(id)) {
+      this.records.set(id, JSON.parse(stored.json) as ProductRecord); this.etags.set(id, etag);
     }
     return this.records.get(id);
   }

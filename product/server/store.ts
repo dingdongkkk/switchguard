@@ -20,6 +20,9 @@ export interface SharedStore {
 }
 
 const recordPath = (id: string) => `sessions/${id}.json`;
+/** Blob returns a weak ETag (W/"…") on compressed reads of larger blobs, but conditional writes only
+ * match the strong form. Every ETag is normalised to the strong form. */
+export const strongEtag = (etag: string | undefined) => (etag ?? '').replace(/^W\//, '');
 const mediaPath = (sid: string, name: string) => `media/${sid}/${name}`;
 
 /** Vercel Blob (private). Needs BLOB_READ_WRITE_TOKEN (added when a Blob store is connected to the project). */
@@ -32,7 +35,7 @@ export class BlobStore implements SharedStore {
     const result = await get(path, { access: 'private', useCache: false });
     if (!result || result.statusCode !== 200) return undefined;
     const bytes = Buffer.from(await new Response(result.stream).arrayBuffer());
-    return { bytes, etag: result.blob.etag };
+    return { bytes, etag: strongEtag(result.blob.etag) };
   }
   async getRecord(id: string) {
     const r = await this.read(recordPath(id));
@@ -42,8 +45,8 @@ export class BlobStore implements SharedStore {
     const { put, BlobPreconditionFailedError, BlobError } = await this.blob();
     try {
       const res = await put(recordPath(id), json, { access: 'private', contentType: 'application/json', addRandomSuffix: false, cacheControlMaxAge: 0,
-        ...(ifMatch ? { ifMatch, allowOverwrite: true } : { allowOverwrite: false }) });
-      return (res as { etag?: string }).etag ?? '';
+        ...(ifMatch ? { ifMatch: strongEtag(ifMatch), allowOverwrite: true } : { allowOverwrite: false }) });
+      return strongEtag((res as { etag?: string }).etag);
     } catch (error) {
       if (error instanceof BlobPreconditionFailedError) throw new StoreConflict(id);
       // Create-only write of an existing record is also a conflict.
@@ -58,7 +61,7 @@ export class BlobStore implements SharedStore {
     let cursor: string | undefined;
     do {
       const page = await list({ prefix: 'sessions/', cursor, limit: 1000 });
-      for (const b of page.blobs) { const m = /^sessions\/([a-f0-9]{24})\.json$/.exec(b.pathname); if (m) out.push({ id: m[1]!, etag: b.etag }); }
+      for (const b of page.blobs) { const m = /^sessions\/([a-f0-9]{24})\.json$/.exec(b.pathname); if (m) out.push({ id: m[1]!, etag: strongEtag(b.etag) }); }
       cursor = page.hasMore ? page.cursor : undefined;
     } while (cursor);
     return out;
@@ -87,10 +90,11 @@ export class MemoryStore implements SharedStore {
   private records = new Map<string, { json: string; etag: string }>();
   private media = new Map<string, Buffer>();
   private n = 0;
-  async getRecord(id: string) { return this.records.get(id); }
+  /** Like Vercel Blob, reads return a weak ETag for anything over 1 KB. */
+  async getRecord(id: string) { const r = this.records.get(id); return r ? { json: r.json, etag: r.json.length > 1024 ? `W/${r.etag}` : r.etag } : undefined; }
   async putRecord(id: string, json: string, ifMatch: string | undefined) {
     const cur = this.records.get(id);
-    if (ifMatch === undefined ? cur !== undefined : cur?.etag !== ifMatch) throw new StoreConflict(id);
+    if (ifMatch === undefined ? cur !== undefined : cur?.etag !== ifMatch) throw new StoreConflict(id);   // strong comparison only
     const etag = `"e${++this.n}"`;
     this.records.set(id, { json, etag });
     return etag;

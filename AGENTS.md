@@ -27,12 +27,12 @@ Keep this log concise and current. Put detailed verification and the project com
 
 ### Coordinator — Codex
 
-- **Status:** handed off — UI redesign and Three.js refinement complete.
-- **Building now:** no active edits. User authorized product UI changes, including replacement of Claude's decorative spectrogram.
-- **Built:** shared navigation and accessible dialogs; editorial review desk with compact statistics and searchable sessions; responsive reviewer/candidate/sandbox/report pages. `product/browser/signal.ts` now renders a custom lit, ribbed continuous ribbon with pointer parallax, reduced-motion support, visibility throttling, disposal and CSS fallback. Three.js is locally served through an allowlisted vendor route. Preserved Claude's added video functionality.
-- **Verified:** `npm test`: 23 foundation + 20 product fixture tests passed. `npm run check` and product build passed. Browser fixture preview checked at 1440px and 390px; no horizontal page overflow or console errors. Sign-in, search/filter, create dialog, review/report, candidate consent screen and sandbox inspected. No live Detectif analysis or microphone capture in this UI task.
-- **Unfinished / limitations:** consenting-human live flow still needs verification; gestures remain unimplemented. See `BUILD_STATUS.md` for deployment and video status.
-- **Resume with:** run `npm run dev`; keep current UI and Claude's backend/video changes. Read this checkpoint before editing shared files.
+- **Status:** active — building Team 08's Canva pitch presentation.
+- **Building now:** presentation and source review artifacts only in `artifacts/`; no product code edits. Canva generation includes team introduction, interview-assistance problem, all current features, speaker-switch timeline, voice-tool examples and future copilot-blocking roadmap.
+- **Built:** reviewed current foundation, product service/routes, media, voice grouping, gestures, reviewer/sandbox/report and deployment/storage paths. Saved `artifacts/PITCH_REVIEW.md` and `artifacts/CANVA_PITCH_BRIEF.md`. Earlier editorial UI and Three.js ribbon remain implemented.
+- **Verified:** latest `npm test` passed 75 tests (23 foundation + 52 product); `npm run check` passed. No live Detectif or biometric uploads in this review.
+- **Unfinished / limitations:** finish Canva generation, inspect pages, verify animation/export availability. Real-human accuracy remains unverified. Gesture and shared-storage features now exist despite stale prior documentation. Copilot blocking is future scope only; named synthetic voice tools have not been individually validated.
+- **Resume with:** finish the 18-slide Canva generation job and produce editable deck/PPT export if available; keep current product code unchanged.
 
 ### Astra — foundation Jobs 1–2
 

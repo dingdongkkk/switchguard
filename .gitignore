@@ -16,3 +16,4 @@ vercel-out/
 .vercel/
 .vercel
 .env*
+!.env.example
