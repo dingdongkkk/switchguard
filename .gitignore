@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.wav
+*.webm
+*.mp4
+.DS_Store
+/product/data/
+
+# Local tooling and screenshots (not part of the app)
+.claude/
+artifacts/

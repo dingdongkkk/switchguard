@@ -1,0 +1,5 @@
+import {createSession} from '../src/shared/decision.js';
+import type {AudioWindow,WindowResult} from '../src/shared/contracts.js';
+export function fixtureSession() { const s = createSession('s', 0); s.enrollment = { id: 'ref', speakerId: 'speaker', participantId: s.candidate.id, enrolledAtMs: 0, provider: {}, authenticity: 'not_checked' }; return s; }
+export function fixtureWindow(id = 'w1', startMs = 0, purpose: 'monitor' | 'reverify' = 'monitor'): AudioWindow { return { id, sessionId: 's', sequence: startMs, startMs, endMs: startMs + 7000, answerIds: ['a1'], source: 'candidate_microphone', purpose, referenceId: 'ref', mimeType: 'audio/wav', sampleRate: 16000, sampleCount: 112000, mediaOffsetMs: 0, coverage: 'pending' }; }
+export function fixtureResult(windowId = 'w1', decision: 'match' | 'no_match' = 'match', verdict: 'real' | 'fake' | 'not_sure' = 'real'): WindowResult { return { windowId, referenceId: 'ref', receivedAtMs: 8000, provenance: 'test_fixture', raw: {}, speaker: { status: 'complete', decision, similarity: decision === 'match' ? .8 : .2, threshold: .53, provider: {} }, authenticity: { status: 'complete', verdict, segments: [], provider: {} } }; }

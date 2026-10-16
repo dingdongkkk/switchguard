@@ -1,0 +1,28 @@
+{
+  "name": "switchguard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:foundation": "tsc -p tsconfig.json",
+    "build": "npm run build:foundation && npm --prefix product run build",
+    "test:foundation": "npm run build:foundation && node --test dist/tests/*.test.js",
+    "test": "npm run test:foundation && npm --prefix product test",
+    "start": "npm --prefix product start",
+    "dev": "npm run build && npm start",
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p product/tsconfig.json --noEmit",
+    "preview:fixture": "npm run build && node product/dist/product/scripts/fixture-server.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/three": "^0.186.0",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "1.0.1",
+    "three": "^0.186.1"
+  }
+}

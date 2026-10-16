@@ -1,0 +1,13 @@
+{
+  "name": "switchguard-product",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "../node_modules/.bin/tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/product/tests/*.test.js",
+    "start": "node --env-file-if-exists=../.env dist/product/server/main.js",
+    "dev": "npm run build && npm start",
+    "smoke:live": "npm run build && node --env-file-if-exists=../.env dist/product/scripts/live-smoke.js",
+    "live:e2e": "npm run build && node --env-file-if-exists=../.env dist/product/scripts/live-e2e.js"
+  }
+}

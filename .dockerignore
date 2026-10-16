@@ -1,0 +1,12 @@
+node_modules
+dist
+product/dist
+product/data
+.env
+.env.*
+!.env.example
+.claude
+*.wav
+*.webm
+*.mp4
+.DS_Store

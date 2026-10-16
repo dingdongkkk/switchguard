@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SwitchGuard Interview</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/js/product/browser/candidate.js"></script>
+</head>
+<body>
+  <header class="top">
+    <h1>SwitchGuard interview</h1>
+    <span id="who" class="muted"></span>
+    <span id="monitoring" class="badge gap" hidden></span>
+  </header>
+  <main>
+    <div class="candidate-intro"><span class="eyebrow">YOUR INTERVIEW, WITH CONFIDENCE</span><h1>Just be yourself.<br>We’re here to listen.</h1><p class="lead">A few simple steps to prepare your voice reference, then you’re ready for the conversation.</p></div>
+    <div class="candidate-progress" aria-label="Interview progress"><div data-step="consent" class="active"><span>1</span>Consent</div><div data-step="enrollment"><span>2</span>Voice reference</div><div data-step="interview"><span>3</span>Conversation</div></div>
+    <div id="errors" role="status" aria-live="polite"></div>
+
+    <section id="permission" class="panel" hidden role="alert" aria-live="assertive">
+      <h2 id="permission-title">Allow microphone access</h2>
+      <p id="permission-message"></p>
+      <ol id="permission-steps"></ol>
+      <div class="row">
+        <button id="permission-retry" class="primary">Try again</button>
+      </div>
+      <p id="permission-wait" class="muted" hidden></p>
+    </section>
+
+    <section id="nolink" class="panel" hidden>
+      <h2>Open the link your interviewer gave you</h2>
+      <p>This page needs the full interview link, including the part after the <code>#</code>. Ask your interviewer to send it again.</p>
+    </section>
+
+    <section id="loading" class="panel">
+      <p class="muted">Connecting…</p>
+    </section>
+
+    <section id="consent" class="panel" hidden>
+      <h2>A moment for your privacy.</h2>
+      <p>During this interview, short windows of your voice are checked to make sure the same person keeps speaking:</p>
+      <ul>
+        <li>You will record a short voice reference now. Later answers are compared against it. This checks <strong>voice continuity only</strong> — it is not proof of your real-world identity.</li>
+        <li>Audio is also checked for signs of synthetic (AI-generated) voice. Both checks are performed by DetectifAI.</li>
+        <li>Short audio windows are kept as evidence for the reviewer. If you allow the camera, small snapshots and short low-resolution video clips are also kept so the reviewer can see the moments around a flagged answer; video older than about two minutes is discarded unless it is near a flagged moment. Everything is deleted under the retention policy. Video is context for a person, never used for automated detection.</li>
+        <li>A human reviewer makes every decision. Nothing is rejected automatically.</li>
+      </ul>
+      <label><input type="checkbox" id="c-voice"> I agree to voice analysis for this interview (required)</label>
+      <label><input type="checkbox" id="c-retention"> I agree that short audio windows are kept for the reviewer under the retention policy (required)</label>
+      <label><input type="checkbox" id="c-camera"> Allow my camera for snapshots and short video clips the reviewer can use as context (optional)</label>
+      <div class="row"><button id="consent-submit" class="primary" disabled>Continue</button></div>
+    </section>
+
+    <section id="enrollment" class="panel" hidden>
+      <h2>Record your voice reference</h2>
+      <p>Read the paragraph below aloud in your normal speaking voice, at a normal pace. Keep reading (start again from the top if you finish) for about 20 seconds.</p>
+      <blockquote id="enroll-text" class="notice"></blockquote>
+      <div class="row"><span class="muted">Microphone level</span></div>
+      <div class="meter"><div id="enroll-meter"></div></div>
+      <p id="enroll-status" class="big"></p>
+      <div class="row">
+        <button id="enroll-start" class="primary">Start recording</button>
+        <button id="enroll-stop" disabled hidden>Stop recording</button>
+        <button id="enroll-retry" hidden>Retry upload</button>
+        <button id="enroll-rerecord" hidden>Record again</button>
+      </div>
+      <p id="enroll-reason" class="notice" hidden></p>
+    </section>
+
+    <section id="interview" hidden>
+      <div id="gesture" class="panel" hidden role="alert" aria-live="assertive">
+        <h2>Quick camera check</h2>
+        <p id="gesture-prompt" class="big"></p>
+        <p id="gesture-countdown" class="muted"></p>
+        <p id="gesture-status" class="notice" hidden></p>
+      </div>
+      <div class="grid">
+        <div class="panel">
+          <h2>Your space</h2>
+          <video id="preview" autoplay muted playsinline hidden></video>
+          <p id="camera-note" class="muted" hidden></p>
+          <div class="row"><button id="camera-retry" hidden>Try camera again</button></div>
+          <div class="row"><span class="muted">Microphone level</span></div>
+          <div class="meter"><div id="live-meter"></div></div>
+          <p id="capture-state" class="muted"></p>
+          <div class="row"><button id="reconnect" class="primary" hidden>Reconnect microphone</button></div>
+          <p id="uploads" class="muted"></p>
+        </div>
+        <div class="panel">
+          <h2>The conversation</h2>
+          <p id="interview-state" class="muted"></p>
+          <p id="interviewer-state" class="muted"></p>
+          <div class="row">
+            <button id="ctl-start" class="primary" hidden>Start interview</button>
+            <button id="ctl-pause" hidden>Pause</button>
+            <button id="ctl-resume" class="primary" hidden>Resume</button>
+            <button id="ctl-end" class="danger" hidden>End interview</button>
+          </div>
+        </div>
+      </div>
+
+
+      <div class="panel" id="question-panel">
+        <h2 id="question-count">Question</h2>
+        <p id="question-text" class="big"></p>
+        <div class="row">
+          <button id="answer-start" class="primary">Start answer</button>
+          <button id="answer-end">End answer</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="challenge" class="panel" hidden>
+      <h2>Please read this phrase aloud</h2>
+      <p id="challenge-phrase" class="big"></p>
+      <p id="challenge-expiry" class="muted"></p>
+      <p id="challenge-status"></p>
+      <div class="row">
+        <button id="challenge-record" class="primary">Record answer</button>
+        <button id="challenge-stop" hidden disabled>Stop</button>
+        <button id="challenge-retry" hidden>Retry upload</button>
+      </div>
+    </div>
+
+    <section id="ended" class="panel" hidden>
+      <h2>Thank you for your time.</h2>
+      <p>The interview has ended. You can close this page once any remaining uploads below have finished.</p>
+      <p id="ended-uploads" class="muted"></p>
+    </section>
+
+    <section id="reeval" class="panel" hidden>
+      <h2>Request a re-evaluation</h2>
+      <p id="reeval-intro" class="muted">If something went wrong — a noisy room, a dropped microphone, someone else talking — you can ask for your voice to be checked again. You will read a short phrase aloud, and a person reviews the new recording.</p>
+      <label for="reeval-reason" id="reeval-reason-label">What happened? (optional)</label>
+      <textarea id="reeval-reason" maxlength="1000" placeholder="For example: my microphone cut out during question 2"></textarea>
+      <div class="row">
+        <button id="reeval-request" class="primary">Request re-evaluation</button>
+        <button id="reeval-new-phrase" hidden>Get a new phrase</button>
+      </div>
+      <p id="reeval-status" class="notice" hidden></p>
+    </section>
+  </main>
+</body>
+</html>

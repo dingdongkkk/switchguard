@@ -1,0 +1,23 @@
+.report h2 { font-size: 16px; }
+.report .panel { break-inside: avoid; }
+.report-footer { max-width: 1200px; margin: 0 auto 40px; padding: 0 16px; font-weight: 600; text-align: center; }
+.report .resolution { margin-left: 16px; padding-left: 8px; border-left: 3px solid var(--border); }
+@media print {
+  :root { --bg: #fff; --panel: #fff; --text: #000; --muted: #333; --border: #999; color-scheme: light; }
+  .no-print, button { display: none !important; }
+  body { background: #fff; color: #000; }
+  main { max-width: none; padding: 0; }
+  .panel { border: 1px solid #999; border-radius: 0; }
+  .badge { border: 1px solid #000 !important; background: none !important; color: #000 !important; }
+  table { font-size: 11px; }
+  .report-footer { position: static; margin-top: 16px; }
+}
+@page { size: A4; margin: 14mm; }
+@media print {
+  .report .panel, .report .table-scroll { overflow: visible; }
+  .report table { width: 100%; table-layout: fixed; }
+  .report th, .report td { font-size: 8px; padding: 5px; overflow-wrap: anywhere; }
+  .report .panel { break-inside: auto; }
+  .report tr { break-inside: avoid; }
+  .report h2 { break-after: avoid; }
+}
