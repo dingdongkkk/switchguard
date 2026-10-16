@@ -171,3 +171,13 @@ test('weak ETags (W/"…") from compressed reads are normalised for conditional 
   assert.equal(strongEtag('W/"abc"'), '"abc"');
   assert.equal(strongEtag('"abc"'), '"abc"');
 });
+
+test('a burst of simultaneous writes to one session from both instances all land', async () => {
+  const { id, key } = await liveSession();
+  const writes = Array.from({ length: 12 }, (_, i) => call(i % 2, 'POST', `/api/sessions/${id}/interruptions`, { key, json: { kind: 'interrupted', reason: `burst ${i}`, atMs: 1 } }));
+  const statuses = (await Promise.all(writes)).map(r => r.status);
+  assert.ok(statuses.every(s => s === 200 || s === 503), JSON.stringify(statuses));
+  const kept = (await call(0, 'GET', `/api/sessions/${id}`, { reviewer: true })).body.interruptions.filter((x: any) => x.reason.startsWith('burst ')).length;
+  assert.equal(kept, statuses.filter(s => s === 200).length, 'every acknowledged write is stored, none twice');
+  assert.ok(kept >= 10, `${kept} of 12 landed`);
+});

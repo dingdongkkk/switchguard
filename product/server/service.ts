@@ -266,7 +266,11 @@ export class SwitchGuardService {
         try { await this.commit(id); }
         catch (error) {
           this.records.delete(id); this.etags.delete(id); this.dirty.delete(id);
-          if (error instanceof StoreConflict && attempt < 5) { await new Promise(r => setTimeout(r, 20 + Math.random() * 80 * (attempt + 1))); continue; }
+          if (error instanceof StoreConflict) {
+            // Jittered exponential backoff; under sustained contention give up with a retryable 503.
+            if (attempt < 9) { await new Promise(r => setTimeout(r, Math.min(1500, 40 * 2 ** attempt) * (0.5 + Math.random()))); continue; }
+            fail('busy', 'This session is being updated by several requests at once; retry in a moment', 503);
+          }
           throw error;
         }
       }
