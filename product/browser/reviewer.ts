@@ -236,13 +236,16 @@ function renderTimeline(view: ReviewerView): void {
       const voices = el('div', { class: 'timeline', role: 'group', 'aria-label': 'Who is speaking' });
       voices.style.height = '22px';
       for (const t of sp.turns) {
-        const seg = el('div', { class: `seg ${personSeg(t.person)}`, role: 'button', tabindex: '0', title: `${personName(t.person)} · ${fmtRange(t.startMs, t.endMs)}` });
+        // Only voices other than the enrolled one are flagged, so only those open the video.
+        const flaggedTurn = t.person !== 1;
+        const seg = el('div', { class: `seg ${personSeg(t.person)}`, ...(flaggedTurn ? { role: 'button', tabindex: '0' } : {}), title: `${personName(t.person)} · ${fmtRange(t.startMs, t.endMs)}${flaggedTurn ? ' · click to watch' : ''}` });
         seg.style.left = `${(t.startMs / span) * 100}%`;
         seg.style.width = `${Math.max(0.3, ((t.endMs - t.startMs) / span) * 100)}%`;
-        seg.addEventListener('click', () => watch(t.startMs - 2000, t.endMs + 2000, `${personName(t.person)} speaking`));
+        if (flaggedTurn) seg.addEventListener('click', () => watch(t.startMs - 2000, t.endMs + 2000, `${personName(t.person)} speaking`));
+        else seg.style.cursor = 'default';
         voices.append(seg);
       }
-      node.append(el('div', { class: 'muted' }, 'Who is speaking (local estimate — click to watch):'), voices,
+      node.append(el('div', { class: 'muted' }, 'Who is speaking (local estimate — click another voice to watch it):'), voices,
         el('div', { class: 'row' }, ...sp.people.map((p) => badge(`${p.label}${p.seconds ? ` · ${p.seconds.toFixed(0)} s` : ''}`, personTone(p.person))), sp.several ? badge(`Several at once · ${sp.several.toFixed(0)} s`, 'gap') : ''),
         el('div', { class: 'muted' }, sp.note));
       if (sp.people.length > 1) node.append(notice(`${sp.people.length} different voices were heard in this session.`, 'warn'));
@@ -416,18 +419,20 @@ function renderEvidence(view: ReviewerView): void {
       mediaNode(w.mediaName, 'audio', `${evidence.length ? 'Flagged' : 'Selected'} window ${fmtRange(w.startMs, w.endMs)}`),
       mediaNode(windows[index + 1]?.mediaName, 'audio', index + 1 < windows.length ? `Next window ${fmtRange(windows[index + 1]!.startMs, windows[index + 1]!.endMs)}` : 'Next window: none')));
 
-    const video = videoContextFor(view, w);
-    node.append(el('div', { class: 'row' }, watchButton(w.startMs, w.endMs, `${evidence.length ? 'Flagged' : 'Selected'} window ${fmtRange(w.startMs, w.endMs)}`, 'Watch exactly this window')));
-    node.append(el('h3', {}, 'Video context'), el('div', { class: 'muted' },
-      `Short clips from ${fmtRange(video.requested.startMs, video.requested.endMs)} (5 s either side), on the same session clock. Visual context for a person — not automated lip-sync or detection evidence.`));
-    if (!video.clips.length) node.append(el('p', { class: 'muted' }, 'No video retained for this interval (camera off or not consented, browser unsupported, or deleted by the rolling buffer / retention policy).'));
-    else node.append(el('div', { class: 'grid' }, ...video.clips.map((c) => mediaNode(c.mediaName, 'video', `Clip ${fmtRange(c.startMs, c.endMs)}`))));
-    if (video.clips.length && video.gaps.length) node.append(el('div', { class: 'muted' }, `Not recorded: ${video.gaps.map((g) => fmtRange(g.startMs, g.endMs)).join(', ')}`));
-
-    const thumbs = view.thumbnails.filter((t) => t.atMs >= w.startMs - 5000 && t.atMs <= w.endMs + 5000);
-    node.append(el('h3', {}, 'Camera thumbnails'), el('div', { class: 'muted' }, 'Navigation aid — not detection evidence.'));
-    if (!thumbs.length) node.append(el('p', { class: 'muted' }, 'No thumbnails within 5 s of this window (camera off, not consented, or purged).'));
-    else node.append(el('div', { class: 'thumbs' }, ...thumbs.map((t) => mediaNode(t.mediaName, 'img', fmtMs(t.atMs)))));
+    // Camera video is offered for flagged moments only.
+    node.append(el('h3', {}, 'Video context'));
+    if (!evidence.length) node.append(el('p', { class: 'muted' }, 'Video is shown only for flagged moments. This window was not flagged.'));
+    else {
+      const video = videoContextFor(view, w);
+      if (!video.clips.length) node.append(el('p', { class: 'muted' }, 'No video was kept for this moment (camera off or not allowed, the browser could not record, or deleted under the retention policy).'));
+      else {
+        node.append(el('div', { class: 'muted' }, `Plays exactly the flagged window ${fmtRange(w.startMs, w.endMs)}. Visual context for a person — not automated detection.`),
+          el('div', { class: 'row' }, watchButton(w.startMs, w.endMs, `Flagged window ${fmtRange(w.startMs, w.endMs)}`, 'Watch the flagged moment')));
+        if (video.gaps.length) node.append(el('div', { class: 'muted' }, `Not recorded: ${video.gaps.map((g) => fmtRange(g.startMs, g.endMs)).join(', ')}`));
+      }
+      const thumbs = view.thumbnails.filter((t) => t.atMs >= w.startMs - 5000 && t.atMs <= w.endMs + 5000);
+      if (thumbs.length) node.append(el('div', { class: 'muted' }, 'Camera snapshots (navigation aid — not detection evidence):'), el('div', { class: 'thumbs' }, ...thumbs.map((t) => mediaNode(t.mediaName, 'img', fmtMs(t.atMs)))));
+    }
 
     for (const e of evidence) node.append(resolutionBlock(e.id, e.resolutions));
   });
@@ -776,8 +781,10 @@ if (!sessionId) app.append(notice('Missing session id. Open this page from the h
 else {
   app.append(pollError, banner, liveNote, sections.header,
     el('div', { class: 'review-layout' },
-      el('div', { class: 'review-main' }, sections.status, sections.timeline, sections.moment, sections.signals, sections.evidence),
-      el('aside', { class: 'review-aside', 'aria-label': 'Verification and coverage' }, sections.gestures, sections.challenges, sections.coverage, sections.enrollment)),
+      // Wide, nested content (re-evaluation versions, enrollment table) lives in the main column; the
+      // narrow side column keeps only compact panels.
+      el('div', { class: 'review-main' }, sections.status, sections.timeline, sections.moment, sections.signals, sections.evidence, sections.challenges, sections.enrollment),
+      el('aside', { class: 'review-aside', 'aria-label': 'Gesture checks and coverage' }, sections.gestures, sections.coverage)),
     sections.danger);
   const params = new URLSearchParams(location.search);
   if (params.get('join') === '1') {

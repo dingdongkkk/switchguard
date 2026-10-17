@@ -318,7 +318,10 @@ const CANDIDATE_REVIEW_TEXT: Record<NonNullable<CandidateView['reviewRequest']>[
 };
 
 function renderReevaluation(v: CandidateView): void {
-  const visible = v.kind === 'interview' && v.enrolled && (v.status === 'ready' || v.status === 'live' || v.status === 'paused' || v.status === 'ended');
+  // Only once the candidate has actually answered something (or a re-evaluation already exists).
+  const started = v.status === 'live' || v.status === 'paused' || v.status === 'ended';
+  const answered = v.answeredQuestionIds.length > 0 || !!v.openAnswer;
+  const visible = v.kind === 'interview' && v.enrolled && started && (answered || !!v.reviewRequest);
   show('reeval', visible);
   if (!visible) return;
   const rr = v.reviewRequest;

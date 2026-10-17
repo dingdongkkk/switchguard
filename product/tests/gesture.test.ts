@@ -31,16 +31,16 @@ test('recognizer categories map to the requested gestures', () => {
   assert.equal(frameMatches('thumbs_up', result()).ok, false, 'no hand');
 });
 
-test('raised hands use the person’s own side (MediaPipe labels assume a mirrored image)', () => {
-  // Unmirrored camera frame: MediaPipe's "Left" is the person's right hand.
-  const rightRaised = result({ category: 'Open_Palm', label: 'Left', x: 0.3, y: 0.35, up: true });
-  assert.equal(frameMatches('raise_right_hand', rightRaised).ok, true);
-  assert.equal(frameMatches('raise_left_hand', rightRaised).ok, false);
-  assert.equal(frameMatches('raise_right_hand', rightRaised).seeing, 'Raised right hand');
+test('raise a hand: either hand counts, but it must be up high with fingers up', () => {
+  const rightRaised = result({ category: 'Open_Palm', label: 'Left', x: 0.3, y: 0.35, up: true });   // MediaPipe "Left" = person's right
+  const leftRaised = result({ category: 'Open_Palm', label: 'Right', x: 0.7, y: 0.35, up: true });
+  assert.equal(frameMatches('raise_hand', rightRaised).ok, true);
+  assert.equal(frameMatches('raise_hand', leftRaised).ok, true);
+  assert.equal(frameMatches('raise_hand', rightRaised).seeing, 'Raised hand');
   // A hand low in the frame, or fingers pointing down, is not "raised".
-  assert.equal(frameMatches('raise_left_hand', result({ category: 'Open_Palm', label: 'Right', y: 0.8, up: true })).ok, false);
-  assert.equal(frameMatches('raise_left_hand', result({ category: 'None', label: 'Right', y: 0.35, up: false })).ok, false);
-  assert.equal(frameMatches('raise_left_hand', result({ category: 'None', label: 'Right', y: 0.35, up: true })).ok, true);
+  assert.equal(frameMatches('raise_hand', result({ category: 'Open_Palm', label: 'Right', y: 0.8, up: true })).ok, false);
+  assert.equal(frameMatches('raise_hand', result({ category: 'None', label: 'Right', y: 0.35, up: false })).ok, false);
+  assert.equal(frameMatches('raise_hand', result({ category: 'None', label: 'Left', y: 0.35, up: true })).ok, true);
 });
 
 test('waving needs an open hand moving side to side', () => {

@@ -79,11 +79,14 @@ export interface VoiceSignalRecord {
   /** The targeted DetectifAI check of just this stretch, or why none ran. */
   targetedWindowId?: string; targetedSkipped?: string;
 }
-export type GestureName = 'thumbs_up' | 'thumbs_down' | 'raise_right_hand' | 'raise_left_hand' | 'point_one_finger' | 'wave_hello';
+/** Gestures the interviewer can request. Either hand counts for "raise a hand". */
+export type GestureName = 'thumbs_up' | 'thumbs_down' | 'raise_hand' | 'point_one_finger' | 'wave_hello';
 export const GESTURES: Record<GestureName, string> = {
-  thumbs_up: 'Thumbs up', thumbs_down: 'Thumbs down', raise_right_hand: 'Raise your right hand', raise_left_hand: 'Raise your left hand',
-  point_one_finger: 'Point one finger up', wave_hello: 'Wave hello',
+  thumbs_up: 'Thumbs up', thumbs_down: 'Thumbs down', raise_hand: 'Raise a hand', point_one_finger: 'Point one finger up', wave_hello: 'Wave hello',
 };
+/** Labels for checks stored before left/right were merged (still displayed, no longer requested). */
+const LEGACY_GESTURES: Record<string, string> = { raise_right_hand: 'Raise your right hand', raise_left_hand: 'Raise your left hand' };
+const gestureLabel = (g: string) => GESTURES[g as GestureName] ?? LEGACY_GESTURES[g] ?? g;
 export interface GestureCheck {
   id: string; gesture: GestureName; issuedAtMs: number; deadlineMs: number; requestedBy: string;
   /** Reported by the candidate's browser (MediaPipe runs there; no video is analysed on the server). */
@@ -885,7 +888,7 @@ export class SwitchGuardService {
     if (!rec.consent?.camera) fail('camera_not_consented', 'The candidate did not allow the camera, so gestures cannot be checked. Use a voice phrase re-evaluation instead.', 409);
     const list = rec.gestureChecks ?? (rec.gestureChecks = []);
     const open = list.find(g => this.gestureView(rec, g).verdict === 'pending');
-    if (open) fail('gesture_pending', `The candidate is still being asked to: ${GESTURES[open.gesture]}`, 409);
+    if (open) fail('gesture_pending', `The candidate is still being asked to: ${gestureLabel(open.gesture)}`, 409);
     if (list.length >= 30) fail('session_limit', 'Too many gesture checks in this session', 429);
     const names = Object.keys(GESTURES) as GestureName[];
     const gesture: GestureName = input.gesture === 'random' || input.gesture === undefined ? names[randomBytes(1)[0]! % names.length]!
@@ -922,7 +925,7 @@ export class SwitchGuardService {
   gestureView(rec: ProductRecord, g: GestureCheck) {
     const now = this.elapsed(rec), r = g.report, grace = SwitchGuardService.GESTURE_GRACE_MS;
     let verdict: 'pending' | 'completed' | 'suspicious' | 'unverified', remark: string;
-    const label = GESTURES[g.gesture];
+    const label = gestureLabel(g.gesture);
     if (!r) {
       if (now <= g.deadlineMs + grace) { verdict = 'pending'; remark = `Waiting for the candidate (${Math.max(0, Math.ceil((g.deadlineMs - now) / 1000))} s left)`; }
       else { verdict = 'suspicious'; remark = `Suspicious: no response from the candidate's device within ${this.config.gestureWindowMs / 1000} s. Check the video context for this time.`; }
@@ -957,6 +960,8 @@ export class SwitchGuardService {
   /** Creates a request with a unique id and issues version 1 (a fresh one-use phrase). */
   createReviewRequest(rec: ProductRecord, input: { requestedBy: 'candidate' | 'reviewer'; reason?: unknown; requesterName?: string; evidenceId?: string }, save = true): ReviewRequest {
     if (!this.canIssue(rec)) fail('invalid_state', 'A re-evaluation can be requested once the voice reference has been accepted', 409);
+    if (input.requestedBy === 'candidate' && (rec.status === 'ready' || (!rec.session.answers.length && !rec.openAnswer)))
+      fail('invalid_state', 'A re-evaluation can be requested after you have started answering', 409);
     const open = this.openReviewRequest(rec);
     if (open) fail('review_request_open', `Re-evaluation ${open.id} is already in progress`, 409);
     if (this.activeChallenge(rec)) fail('challenge_active', 'A phrase is already waiting for the candidate', 409);
@@ -1138,9 +1143,9 @@ export class SwitchGuardService {
       pendingChallenge: pending ? { id: pending.id, phrase: pending.phrase, expiresAtMs: pending.expiresAtMs, reviewRequestId: rec.challengeMeta[pending.id]?.reviewRequestId } : undefined,
       interviewer: { joined: !!rec.interviewer, connected: this.connected(rec, 'reviewer') },
       pendingGesture: (() => { const g = (rec.gestureChecks ?? []).find(x => !x.report && this.gestureView(rec, x).verdict === 'pending');
-        return g ? { id: g.id, gesture: g.gesture, label: GESTURES[g.gesture], issuedAtMs: g.issuedAtMs, deadlineMs: g.deadlineMs } : undefined; })(),
+        return g ? { id: g.id, gesture: g.gesture, label: gestureLabel(g.gesture), issuedAtMs: g.issuedAtMs, deadlineMs: g.deadlineMs } : undefined; })(),
       reviewRequest: latest ? { id: latest.id, status: this.reviewStatus(rec, latest), versions: latest.versions.length, requestedBy: latest.requestedBy } : undefined,
-      canRequestReevaluation: this.canIssue(rec) && !this.openReviewRequest(rec) && !pending && (rec.reviewRequests?.length ?? 0) < MAX_REQUESTS,
+      canRequestReevaluation: this.canIssue(rec) && rec.status !== 'ready' && (rec.session.answers.length > 0 || !!rec.openAnswer) && !this.openReviewRequest(rec) && !pending && (rec.reviewRequests?.length ?? 0) < MAX_REQUESTS,
       windowMs: this.config.windowMs, nowMs,
     };
   }

@@ -80,10 +80,9 @@ export interface VideoContext {
   clips: { startMs: number; endMs: number; mediaName: string; mimeType: string }[];
 }
 
-export type GestureName = 'thumbs_up' | 'thumbs_down' | 'raise_right_hand' | 'raise_left_hand' | 'point_one_finger' | 'wave_hello';
+export type GestureName = 'thumbs_up' | 'thumbs_down' | 'raise_hand' | 'point_one_finger' | 'wave_hello';
 export const GESTURE_LABEL: Record<GestureName, string> = {
-  thumbs_up: 'Thumbs up', thumbs_down: 'Thumbs down', raise_right_hand: 'Raise right hand', raise_left_hand: 'Raise left hand',
-  point_one_finger: 'Point one finger', wave_hello: 'Wave hello',
+  thumbs_up: 'Thumbs up', thumbs_down: 'Thumbs down', raise_hand: 'Raise a hand', point_one_finger: 'Point one finger', wave_hello: 'Wave hello',
 };
 /** Local screening estimate plus the targeted DetectifAI check it triggered (the only part that can become evidence). */
 export interface VoiceSignalView {

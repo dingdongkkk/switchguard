@@ -1,1 +1,17 @@
 @import url('/theme.css');
+
+/* Review page: keep every panel's content inside its panel. */
+.review-main, .review-aside, .review-main .panel, .review-aside .panel { min-width: 0; }
+.review-main .panel, .review-aside .panel { overflow-wrap: anywhere; }
+.review-main img, .review-main video, .review-main audio,
+.review-aside img, .review-aside video, .review-aside audio { max-width: 100%; }
+.review-main video, .review-aside video { height: auto; display: block; }
+.review-gestures img { width: 100%; height: auto; max-height: 200px; object-fit: contain; border-radius: 8px; }
+.review-gestures .grid, .review-aside .grid { grid-template-columns: 1fr; }
+.review-moment video { width: 100%; max-height: 420px; background: #000; border-radius: 10px; }
+.review-main .table-scroll, .review-main table { max-width: 100%; }
+.review-main table { width: 100%; }
+.review-main td, .review-main th { overflow-wrap: anywhere; }
+.review-challenges .panel .panel { padding: 14px; }
+.review-timeline .row, .review-signals .row, .review-evidence .row { flex-wrap: wrap; }
+.review-signals td:last-child .row { flex-direction: column; align-items: stretch; }

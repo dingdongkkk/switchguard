@@ -4,12 +4,11 @@
  * 30 s) — it does not prove identity and does not override any voice result. */
 import type { GestureRecognizer, GestureRecognizerResult } from '@mediapipe/tasks-vision';
 
-export type GestureName = 'thumbs_up' | 'thumbs_down' | 'raise_right_hand' | 'raise_left_hand' | 'point_one_finger' | 'wave_hello';
+export type GestureName = 'thumbs_up' | 'thumbs_down' | 'raise_hand' | 'point_one_finger' | 'wave_hello';
 export const GESTURE_PROMPT: Record<GestureName, { icon: string; text: string }> = {
   thumbs_up: { icon: '👍', text: 'Show a thumbs up to the camera' },
   thumbs_down: { icon: '👎', text: 'Show a thumbs down to the camera' },
-  raise_right_hand: { icon: '✋', text: 'Raise your right hand' },
-  raise_left_hand: { icon: '✋', text: 'Raise your left hand' },
+  raise_hand: { icon: '✋', text: 'Raise one hand (either hand)' },
   point_one_finger: { icon: '☝️', text: 'Point one finger up' },
   wave_hello: { icon: '👋', text: 'Wave hello at the camera' },
 };
@@ -60,11 +59,9 @@ function matches(target: GestureName, obs: HandObs[], history: Array<{ t: number
     case 'thumbs_up': return best((h) => h.category === 'Thumb_Up' && h.score >= 0.6);
     case 'thumbs_down': return best((h) => h.category === 'Thumb_Down' && h.score >= 0.6);
     case 'point_one_finger': return best((h) => h.category === 'Pointing_Up' && h.score >= 0.6);
-    case 'raise_right_hand': case 'raise_left_hand': {
-      const side = target === 'raise_right_hand' ? 'right' : 'left';
-      // Hand in the upper part of the picture with fingers pointing up.
-      return best((h) => h.personHand === side && h.wristY < 0.55 && h.fingersUp);
-    }
+    case 'raise_hand':
+      // Either hand, in the upper part of the picture with fingers pointing up.
+      return best((h) => h.wristY < 0.55 && h.fingersUp);
     case 'wave_hello': {
       const open = obs.some((h) => (h.category === 'Open_Palm' || h.fingersUp));
       if (!open || history.length < 6) return { ok: false, score: 0 };
@@ -90,7 +87,7 @@ export function frameMatches(target: GestureName, result: GestureRecognizerResul
 }
 
 function describe(obs: HandObs): string | undefined {
-  if (obs.wristY < 0.55 && obs.fingersUp && (obs.category === 'None' || obs.category === 'Open_Palm')) return `Raised ${obs.personHand} hand`;
+  if (obs.wristY < 0.55 && obs.fingersUp && (obs.category === 'None' || obs.category === 'Open_Palm')) return 'Raised hand';
   return obs.category !== 'None' && obs.score >= 0.6 ? CATEGORY_LABEL[obs.category] ?? obs.category : undefined;
 }
 

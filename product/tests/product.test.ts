@@ -496,6 +496,11 @@ test('interviewer join: statuses, authorization, reviewer-side start, same sessi
 test('re-evaluation: candidate request → versioned voice response → linked evaluation → dashboard sees it', async () => {
   const { id, key } = await enrolledLiveSession();
   clock = 1_000_000 + 40_000;
+  // Not before the candidate has answered anything.
+  const early = await call('POST', `/api/sessions/${id}/review-requests`, { key, json: {} });
+  assert.equal(early.status, 409);
+  assert.equal((await call('GET', `/api/sessions/${id}/candidate`, { key })).body.canRequestReevaluation, false);
+  await call('POST', `/api/sessions/${id}/answers/start`, { key, json: { questionId: 'q1' } });
   const req = await call('POST', `/api/sessions/${id}/review-requests`, { key, json: { reason: 'My microphone cut out on question 2' } });
   assert.equal(req.status, 200, JSON.stringify(req.body));
   const cand = req.body;
@@ -555,6 +560,7 @@ test('re-evaluation works after the interview ended, and reviewer re-verificatio
   assert.equal(rr.reason, 'Ask again');
   const close = await call('POST', `/api/sessions/${id}/review-requests/${rr.id}/close`, { reviewer: true, json: { outcome: 'reviewed', notes: 'Fine', reviewerId: 'Rev' } });
   assert.equal(close.status, 200);
+  await call('POST', `/api/sessions/${id}/answers/start`, { key, json: { questionId: 'q1' } });
   await call('POST', `/api/sessions/${id}/control`, { key, json: { action: 'end' } });
   const after = await call('POST', `/api/sessions/${id}/review-requests`, { key, json: { reason: 'Please re-check' } });
   assert.equal(after.status, 200);
@@ -661,12 +667,12 @@ test('gesture checks: 30 s to perform, results and suspicious remarks, reviewer-
   assert.equal((await call('POST', `/api/sessions/${id}/gestures/${check.id}/report`, { key, json: { status: 'performed', detectedAtMs: 44_000 } })).status, 409, 'one result per check');
 
   // Not performed in time → suspicious, with what was seen instead.
-  const g2 = (await call('POST', `/api/sessions/${id}/gestures`, { reviewer: true, json: { gesture: 'raise_left_hand' } })).body.gestureChecks[1];
+  const g2 = (await call('POST', `/api/sessions/${id}/gestures`, { reviewer: true, json: { gesture: 'raise_hand' } })).body.gestureChecks[1];
   clock += 31_000;
   await call('POST', `/api/sessions/${id}/gestures/${g2.id}/report`, { key, json: { status: 'not_performed', observed: ['Raise right hand'], frames: 900, handFrames: 300 } });
   // No response at all → suspicious after the grace period.
   const g3 = (await call('POST', `/api/sessions/${id}/gestures`, { reviewer: true, json: { gesture: 'random' } })).body.gestureChecks[2];
-  assert.ok(Object.keys({ thumbs_up: 1, thumbs_down: 1, raise_right_hand: 1, raise_left_hand: 1, point_one_finger: 1, wave_hello: 1 }).includes(g3.gesture));
+  assert.ok(Object.keys({ thumbs_up: 1, thumbs_down: 1, raise_hand: 1, point_one_finger: 1, wave_hello: 1 }).includes(g3.gesture));
   clock += 41_000;
   // Camera problem → unverified (not a pass, not an accusation).
   const g4 = (await call('POST', `/api/sessions/${id}/gestures`, { reviewer: true, json: { gesture: 'point_one_finger' } })).body.gestureChecks[3];

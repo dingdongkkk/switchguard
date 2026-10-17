@@ -110,7 +110,7 @@ service.resolve(rec, rec.session.evidence[0]!.id, { disposition: 'request_reveri
   const g1 = service.requestGesture(rec, { gesture: 'thumbs_up', reviewerId: 'Fixture reviewer' });
   clock += 4_200;
   service.reportGesture(rec, g1.id, { status: 'performed', detectedAtMs: g1.issuedAtMs + 3_600, confidence: 0.88, frames: 61, handFrames: 44, snapshot });
-  const g2 = service.requestGesture(rec, { gesture: 'raise_left_hand', reviewerId: 'Fixture reviewer' });
+  const g2 = service.requestGesture(rec, { gesture: 'raise_hand', reviewerId: 'Fixture reviewer' });
   clock += 31_000;
   service.reportGesture(rec, g2.id, { status: 'not_performed', observed: ['Raised right hand', 'Open hand'], frames: 455, handFrames: 120 });
   clock += 1_000;
