@@ -49,6 +49,7 @@
       <label><input type="checkbox" id="c-voice"> I agree to voice analysis for this interview (required)</label>
       <label><input type="checkbox" id="c-retention"> I agree that short audio windows are kept for the reviewer under the retention policy (required)</label>
       <label><input type="checkbox" id="c-camera"> Allow my camera for snapshots and short video clips the reviewer can use as context (optional)</label>
+      <label id="c-transcript-row"><input type="checkbox" id="c-transcript"> Show the reviewer a live text transcript of what I say (optional). Chrome turns speech into text using Google’s speech service; only the text is kept.</label>
       <div class="row"><button id="consent-submit" class="primary" disabled>Continue</button></div>
     </section>
 
@@ -84,6 +85,7 @@
           <div class="row"><span class="muted">Microphone level</span></div>
           <div class="meter"><div id="live-meter"></div></div>
           <p id="capture-state" class="muted"></p>
+          <p id="transcript-state" class="muted" hidden></p>
           <div class="row"><button id="reconnect" class="primary" hidden>Reconnect microphone</button></div>
           <p id="uploads" class="muted"></p>
         </div>

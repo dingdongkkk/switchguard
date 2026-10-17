@@ -50,7 +50,9 @@ export const QUESTIONS: Question[] = [
 
 export type Status = 'consent' | 'enrollment' | 'ready' | 'live' | 'paused' | 'ended';
 export type Kind = 'interview' | 'sandbox';
-export interface Consent { voiceAnalysis: boolean; camera: boolean; retention: boolean; atMs: number }
+export interface Consent { voiceAnalysis: boolean; camera: boolean; retention: boolean; atMs: number; transcript?: boolean }
+/** One recognised phrase on the session clock (Chrome speech recognition on the candidate's device). */
+export interface TranscriptPhrase { id: string; startMs: number; endMs: number; text: string }
 export interface SandboxMeta { scenario: string; label: string; notes?: string; switchOnsetSec?: number }
 export interface EnrollmentAttempt {
   id: string; atMs: number; durationMs: number; localVoicedSec: number;
@@ -126,6 +128,8 @@ export interface ProductRecord {
   speakerClusters?: SpeakerCluster[];
   speakerSlices?: Array<{ s: number; e: number; p: number }>;   // p = person, 0 = several at once
   reviewRequests?: ReviewRequest[];
+  /** Live transcript phrases (only with transcript consent). Text only; no audio leaves through this path. */
+  transcript?: TranscriptPhrase[];
   /** Completed client logical operations (X-Operation-Id) → payload hash + stored response. */
   operations: Record<string, { hash: string; result: unknown }>;
 }
@@ -499,7 +503,7 @@ export class SwitchGuardService {
     if (rec.status !== 'consent' && rec.status !== 'enrollment') fail('invalid_state', 'Consent was already recorded', 409);
     if (input.voiceAnalysis !== true || input.retention !== true) fail('consent_required', 'Voice analysis and evidence retention consent are required to continue');
     if (rec.kind === 'sandbox' && input.camera === true) fail('invalid_parameter', 'Sandbox runs have no camera');
-    rec.consent = { voiceAnalysis: true, camera: input.camera === true, retention: true, atMs: this.elapsed(rec) };
+    rec.consent = { voiceAnalysis: true, camera: input.camera === true, retention: true, atMs: this.elapsed(rec), transcript: rec.kind === 'interview' && input.transcript === true };
     rec.status = 'enrollment'; this.save(rec);
   }
 
@@ -930,6 +934,64 @@ export class SwitchGuardService {
     }
     g.report = report; this.save(rec);
   }
+  // ---------- live transcript ----------
+  /** Adds recognised phrases (idempotent by phrase id, so a retried batch is harmless). */
+  addTranscript(rec: ProductRecord, input: Record<string, any>): { accepted: number } {
+    if (!rec.consent?.transcript) fail('consent_required', 'The candidate did not allow a live transcript', 403);
+    if (rec.status !== 'live' && rec.status !== 'paused' && rec.status !== 'ended') fail('invalid_state', 'The interview has not started', 409);
+    const phrases = input.phrases;
+    if (!Array.isArray(phrases) || phrases.length === 0 || phrases.length > 20) fail('invalid_parameter', 'Send 1–20 phrases');
+    const list = rec.transcript ??= [], seen = new Set(list.map(p => p.id)), now = this.elapsed(rec);
+    let accepted = 0;
+    for (const raw of phrases as unknown[]) {
+      const p = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+      const id = typeof p.id === 'string' && /^[A-Za-z0-9-]{6,40}$/.test(p.id) ? p.id : undefined;
+      const text = typeof p.text === 'string' ? p.text.replace(/\s+/g, ' ').trim().slice(0, 500) : '';
+      const startMs = typeof p.startMs === 'number' && Number.isFinite(p.startMs) ? Math.round(p.startMs) : NaN;
+      const endMs = typeof p.endMs === 'number' && Number.isFinite(p.endMs) ? Math.round(p.endMs) : NaN;
+      if (!id || !text || !(startMs >= 0) || !(endMs >= startMs) || endMs - startMs > 60_000 || endMs > now + 5000) fail('invalid_parameter', 'Invalid transcript phrase');
+      if (seen.has(id)) continue;
+      if (list.length >= 2000) fail('limit_reached', 'Transcript limit reached for this interview', 429);
+      list.push({ id, startMs, endMs, text }); seen.add(id); accepted++;
+    }
+    if (accepted) { list.sort((a, b) => a.startMs - b.startMs); this.save(rec); }
+    return { accepted };
+  }
+  /** Each phrase with who was speaking (local voice grouping) and what DetectifAI said about the
+   * audio under it. Red ("bad") = another person or several voices, a synthetic-voice verdict, or a
+   * flagged window; amber = DetectifAI was not sure. Timing is approximate (phrase level). */
+  transcriptView(rec: ProductRecord) {
+    const slices = rec.speakerSlices ?? [], windows = rec.session.windows;
+    const flagged = new Set(rec.session.evidence.map(e => e.windowId));
+    const phrases = (rec.transcript ?? []).map(p => {
+      const dur = Math.max(1, p.endMs - p.startMs);
+      const secs = new Map<number, number>();
+      for (const sl of slices) { const o = Math.min(sl.e, p.endMs) - Math.max(sl.s, p.startMs); if (o > 0) secs.set(sl.p, (secs.get(sl.p) ?? 0) + o); }
+      const voiced = [...secs.values()].reduce((a, b) => a + b, 0);
+      const people = [...secs.entries()].map(([person, ms]) => ({ person, seconds: Math.round(ms / 100) / 10 })).sort((a, b) => b.seconds - a.seconds);
+      const reasons: string[] = [];
+      let tone: 'ok' | 'warn' | 'bad' | 'gap' = voiced > 0 ? 'ok' : 'gap';
+      for (const { person, seconds } of people) {
+        if (person === 1 || !(seconds * 1000 >= 750 || seconds * 1000 >= voiced * 0.3)) continue;
+        reasons.push(person === 0 ? 'Several voices at once' : `Person ${person} speaking (not the enrolled voice)`); tone = 'bad';
+      }
+      let windowId: string | undefined;
+      for (const w of windows) {
+        const o = Math.min(w.endMs, p.endMs) - Math.max(w.startMs, p.startMs);
+        if (o <= 0 || o < Math.min(1000, dur * 0.5)) continue;
+        const r = rec.session.results.find(x => x.windowId === w.id);
+        if (flagged.has(w.id)) { windowId ??= w.id; if (!reasons.some(x => x.startsWith('Flagged'))) reasons.push(`Flagged by DetectifAI (window #${w.sequence})`); tone = 'bad'; }
+        if (r?.authenticity.status === 'complete' && r.authenticity.verdict === 'fake') { windowId ??= w.id; if (!reasons.includes('Synthetic (AI) voice verdict')) reasons.push('Synthetic (AI) voice verdict'); tone = 'bad'; }
+        else if (r?.speaker.status === 'complete' && r.speaker.decision === 'no_match') { windowId ??= w.id; if (!reasons.includes('Voice did not match the reference')) reasons.push('Voice did not match the reference'); tone = 'bad'; }
+        else if (r?.authenticity.status === 'complete' && r.authenticity.verdict === 'not_sure' && tone !== 'bad') { windowId ??= w.id; if (!reasons.includes('DetectifAI not sure')) reasons.push('DetectifAI not sure'); tone = 'warn'; }
+        if (r && tone !== 'bad' && tone !== 'warn') { windowId ??= w.id; tone = 'ok'; }
+      }
+      return { ...p, tone, people, reasons, windowId };
+    });
+    return { enabled: !!rec.consent?.transcript, phrases, redCount: phrases.filter(p => p.tone === 'bad').length,
+      note: 'Recognised by Chrome on the candidate’s device. Words are approximate; colours come from voice grouping and DetectifAI checks at the same time.' };
+  }
+
   /** Verdicts are derived, so a candidate who never answers becomes "suspicious" once the time is up. */
   gestureView(rec: ProductRecord, g: GestureCheck) {
     const now = this.elapsed(rec), r = g.report, grace = SwitchGuardService.GESTURE_GRACE_MS;
@@ -1205,6 +1267,7 @@ export class SwitchGuardService {
       }),
       targetedChecks: { used: rec.targetedChecks ?? 0, max: this.config.maxTargetedChecks, skippedAnalyses: rec.voiceScanSkipped ?? 0, lowCredits: typeof this.lastBalance === 'number' && this.lastBalance < this.config.lowCreditThreshold },
       gestureChecks: (rec.gestureChecks ?? []).map(g => this.gestureView(rec, g)),
+      transcript: this.transcriptView(rec),
     };
   }
   summaries() {

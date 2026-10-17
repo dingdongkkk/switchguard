@@ -993,3 +993,51 @@ test('judge demo limits: concurrent sessions, provider checks per session, 24 h 
   const r = await service.expireSessions();
   assert.equal(r.deleted, 2);
 });
+
+test('live transcript: needs consent, is idempotent, and marks other-person and AI-voice phrases red', async () => {
+  const created = await call('POST', '/api/sessions', { reviewer: true, json: { displayName: 'Tx', kind: 'interview' } });
+  const id: string = created.body.sessionId, key: string = created.body.candidateKey;
+  assert.equal((await call('POST', `/api/sessions/${id}/consent`, { key, json: { voiceAnalysis: true, camera: false, retention: true, transcript: true } })).body.consent.transcript, true);
+  clock += 25_000;
+  assert.equal((await call('POST', `/api/sessions/${id}/transcript`, { key, json: { phrases: [{ id: 'p-early000', startMs: 1000, endMs: 2000, text: 'too early' }] } })).status, 409, 'not before the interview starts');
+  assert.equal((await call('POST', `/api/sessions/${id}/enrollment`, { key, wav: speechLike(20), meta: { startMs: 3000, endMs: 23000 } })).body.accepted, true);
+  await call('POST', `/api/sessions/${id}/control`, { key, json: { action: 'start' } });
+
+  // 7 s of the enrolled voice, then 8 s of someone else; then a window DetectifAI calls synthetic.
+  await rawWindow(id, key, 50_100, concatPcm(voicePcm(7, 190, VOICE_A, 1.1), voicePcm(8, 120, VOICE_B, 4.2)));
+  script = (c) => c.path === '/speakers/verify' ? verifyOk('match', 'fake') : defaultScript(c);
+  await window(id, key, 80_000, 7);
+  script = defaultScript;
+
+  const phrases = [
+    { id: 'p-first001', startMs: 50_600, endMs: 56_200, text: 'I led the payments migration last year' },
+    { id: 'p-second01', startMs: 58_300, endMs: 64_500, text: 'we used a queue to smooth the load' },
+    { id: 'p-synth001', startMs: 80_500, endMs: 86_000, text: 'the design scaled to ten times the traffic' },
+  ];
+  clock = 1_000_000 + 90_000;
+  assert.deepEqual((await call('POST', `/api/sessions/${id}/transcript`, { key, json: { phrases } })).body, { accepted: 3 });
+  assert.deepEqual((await call('POST', `/api/sessions/${id}/transcript`, { key, json: { phrases } })).body, { accepted: 0 }, 'a retried batch is not duplicated');
+  for (const bad of [{ ...phrases[0], id: 'x' }, { ...phrases[0], id: 'p-badtime1', endMs: 40_000 }, { ...phrases[0], id: 'p-future01', startMs: 200_000, endMs: 201_000 }, { ...phrases[0], id: 'p-empty001', text: '  ' }]) {
+    assert.equal((await call('POST', `/api/sessions/${id}/transcript`, { key, json: { phrases: [bad] } })).status, 400, JSON.stringify(bad));
+  }
+  assert.equal((await call('POST', `/api/sessions/${id}/transcript`, { reviewer: true, json: { phrases } })).status >= 400, true, 'only the candidate posts phrases');
+
+  const tx = (await view(id)).transcript;
+  assert.equal(tx.enabled, true);
+  const byId = Object.fromEntries(tx.phrases.map((p: any) => [p.id, p]));
+  assert.equal(byId['p-first001'].tone, 'ok', JSON.stringify(byId['p-first001']));
+  assert.equal(byId['p-second01'].tone, 'bad', JSON.stringify(byId['p-second01']));
+  assert.ok(byId['p-second01'].reasons.some((r: string) => /^Person 2/.test(r)), JSON.stringify(byId['p-second01'].reasons));
+  assert.equal(byId['p-synth001'].tone, 'bad');
+  assert.ok(byId['p-synth001'].reasons.includes('Synthetic (AI) voice verdict'));
+  assert.ok(byId['p-synth001'].windowId);
+  assert.equal(tx.redCount, 2);
+  // The candidate never sees the colouring; the export carries it for the reviewer.
+  assert.equal((await call('GET', `/api/sessions/${id}/candidate`, { key })).body.transcript, undefined);
+  assert.equal((await call('GET', `/api/sessions/${id}/export`, { reviewer: true })).body.transcript.phrases.length, 3);
+
+  // Without transcript consent the endpoint refuses.
+  const plain = await enrolledLiveSession();
+  const refused = await call('POST', `/api/sessions/${plain.id}/transcript`, { key: plain.key, json: { phrases: [{ id: 'p-aaaaaaaa', startMs: 0, endMs: 1000, text: 'hello' }] } });
+  assert.equal(refused.status, 403);
+});

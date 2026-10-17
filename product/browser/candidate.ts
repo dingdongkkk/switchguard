@@ -4,6 +4,7 @@ import { encodeWav, PcmWindowAssembler, type PcmClip } from '../../src/media/wav
 import { api, ApiError, candidateFromHash, el, fmtMs, operationId, SessionClock, type Auth, type CandidateView } from './api.js';
 import { CandidateCapture, CaptureError, describeCaptureProblem, meterFraction, PERMISSION_TIMEOUT_MS } from './capture.js';
 import { VideoContextRecorder } from './video-recorder.js';
+import { LiveTranscriber, SpeechRecognitionCtor } from './transcriber.js';
 import { GESTURE_PROMPT, loadRecognizer, watchGesture, type GestureProgress } from './gesture.js';
 
 const ENROLL_PARAGRAPH =
@@ -408,13 +409,15 @@ function renderUploads(): void {
 // ---------------------------------------------------------------- consent
 function wireConsent(): void {
   const voice = $<HTMLInputElement>('c-voice'), retention = $<HTMLInputElement>('c-retention'), camera = $<HTMLInputElement>('c-camera');
+  const transcript = $<HTMLInputElement>('c-transcript');
+  if (!SpeechRecognitionCtor) $('c-transcript-row').hidden = true;   // this browser cannot transcribe
   const submit = $<HTMLButtonElement>('consent-submit');
   const update = () => { submit.disabled = !(voice.checked && retention.checked); };
   voice.addEventListener('change', update); retention.addEventListener('change', update);
   submit.addEventListener('click', async () => {
     submit.disabled = true;
     try {
-      applyView(await api.consent(target.auth, target.sessionId, { voiceAnalysis: voice.checked, camera: camera.checked, retention: retention.checked }));
+      applyView(await api.consent(target.auth, target.sessionId, { voiceAnalysis: voice.checked, camera: camera.checked, retention: retention.checked, transcript: !!SpeechRecognitionCtor && transcript.checked }));
       void ensureCapture();   // inside the click gesture so the audio context may start
     } catch (error) { showError(message(error)); update(); }
   });
@@ -508,18 +511,11 @@ function wireEnrollment(): void {
 }
 
 // ---------------------------------------------------------------- challenge
-interface SpeechRecognitionLike {
-  lang: string; interimResults: boolean; continuous: boolean; maxAlternatives: number;
-  onresult: ((event: any) => void) | null; onerror: ((event: any) => void) | null; onend: (() => void) | null;
-  start(): void; stop(): void;
-}
-const SpeechRecognitionCtor: (new () => SpeechRecognitionLike) | undefined =
-  (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
 
 type ChallengePhase = 'idle' | 'recording' | 'uploading' | 'retry' | 'submitted';
 let challenge: { id: string; phrase: string; expiresAtMs: number; phase: ChallengePhase; note: string;
   pending?: { wav: Uint8Array; startMs: number; endMs: number; transcript: string; opId: string } } | undefined;
-let recognition: { instance: SpeechRecognitionLike; transcript: string[]; ended: Promise<void> } | undefined;
+let recognition: { instance: InstanceType<NonNullable<typeof SpeechRecognitionCtor>>; transcript: string[]; ended: Promise<void> } | undefined;
 let challengeTimer: ReturnType<typeof setInterval> | undefined;
 
 function renderChallenge(v: CandidateView): void {
@@ -550,6 +546,7 @@ function renderChallenge(v: CandidateView): void {
 
 function startRecognition(): void {
   recognition = undefined;
+  liveTranscript?.set(false);   // Chrome runs one recogniser at a time; the live transcript resumes afterwards
   if (!SpeechRecognitionCtor) return;
   try {
     const instance = new SpeechRecognitionCtor();
@@ -766,6 +763,27 @@ function startVideoContext(): void {
   setInterval(sync, 1000);
 }
 
+/** Live transcript while the interview is live and the candidate allowed it; paused for challenge recordings. */
+let liveTranscript: LiveTranscriber | undefined;
+function startLiveTranscript(): void {
+  const state = $('transcript-state');
+  const sync = () => {
+    const allowed = !!view?.consent?.transcript && !!SpeechRecognitionCtor;
+    if (allowed && !liveTranscript) {
+      liveTranscript = new LiveTranscriber(target.auth, target.sessionId, clock, { onError: showError });
+      window.addEventListener('pagehide', () => void liveTranscript?.flush());
+    }
+    if (!liveTranscript) { state.hidden = true; return; }
+    const wanted = view?.status === 'live' && challenge?.phase !== 'recording' && !recognition;
+    liveTranscript.set(wanted);
+    state.hidden = view?.status !== 'live' && view?.status !== 'paused';
+    state.textContent = liveTranscript.unavailable ? 'Live transcript: unavailable in this browser.'
+      : liveTranscript.active ? `Live transcript: on · ${liveTranscript.phrases} phrase${liveTranscript.phrases === 1 ? '' : 's'}`
+        : wanted ? 'Live transcript: starting…' : 'Live transcript: paused';
+  };
+  setInterval(sync, 1000);
+}
+
 function startMeters(): void {
   const enrollMeter = $('enroll-meter'), liveMeter = $('live-meter');
   const frame = () => {
@@ -801,6 +819,7 @@ async function main(): Promise<void> {
   startMeters();
   startThumbnails();
   startVideoContext();
+  startLiveTranscript();
   window.addEventListener('beforeunload', (event) => { if (queue.length || recording) event.preventDefault(); });
   await poll();
   pollTimer = setInterval(() => void poll(), POLL_MS);

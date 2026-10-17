@@ -24,6 +24,7 @@ const sections = {
   challenges: el('section', { class: 'panel review-challenges', id: 'challenges' }),
   gestures: el('section', { class: 'panel review-gestures', id: 'gestures' }),
   signals: el('section', { class: 'panel review-signals', id: 'signals' }),
+  transcript: el('section', { class: 'panel review-transcript', id: 'transcript' }),
   moment: el('section', { class: 'panel review-moment', id: 'moment' }),
   danger: el('section', { class: 'panel review-danger', id: 'danger' }),
 };
@@ -330,6 +331,42 @@ function watchButton(startMs: number, endMs: number, title: string, label = 'Wat
   const b = el('button', { type: 'button' }, label);
   b.addEventListener('click', () => watch(startMs, endMs, title));
   return b;
+}
+
+// ---------- live transcript ----------
+let transcriptRedOnly = false;
+function renderTranscript(view: ReviewerView): void {
+  const t = view.transcript;
+  renderIf('transcript', [t, transcriptRedOnly], (node) => {
+    node.append(el('h2', {}, 'Live transcript'));
+    if (!t?.enabled) {
+      node.append(el('p', { class: 'muted' }, 'No live transcript: the candidate did not allow it, or their browser cannot transcribe.'));
+      return;
+    }
+    node.append(el('div', { class: 'row tx-legend' },
+      badge('Enrolled voice', 'ok'), badge('Other person, AI voice or flagged', 'bad'), badge('DetectifAI not sure', 'warn'), badge('Not analysed yet', 'gap')));
+    if (!t.phrases.length) { node.append(el('p', { class: 'muted' }, 'Waiting for the candidate to speak…')); return; }
+    const toggle = el('button', { type: 'button' }, transcriptRedOnly ? 'Show everything' : `Show only red (${t.redCount})`);
+    toggle.addEventListener('click', () => { transcriptRedOnly = !transcriptRedOnly; renderTranscript(view); });
+    node.append(el('div', { class: 'row' }, el('span', { class: 'muted' }, `${t.phrases.length} phrase${t.phrases.length === 1 ? '' : 's'} · ${t.redCount} in red`), toggle));
+    const list = el('div', { class: 'tx-list' });
+    const shown = transcriptRedOnly ? t.phrases.filter((p) => p.tone === 'bad') : t.phrases;
+    if (!shown.length) list.append(el('p', { class: 'muted' }, 'Nothing in red.'));
+    for (const p of shown) {
+      const time = el('button', { type: 'button', class: 'tx-time link-button', title: 'Open the check for this moment' }, fmtMs(p.startMs));
+      const target = p.windowId;
+      if (target) time.addEventListener('click', () => select(target)); else time.disabled = true;
+      const who = p.people.filter((x) => x.person !== 1).map((x) => personName(x.person));
+      const line = el('div', { class: `tx-line tx-${p.tone}` }, time, el('span', { class: 'tx-text' }, p.text));
+      if (p.tone === 'bad' || p.tone === 'warn') {
+        const why = el('div', { class: 'tx-why' }, p.reasons.join(' · ') + (who.length && !p.reasons.some((r) => r.startsWith('Person') || r.startsWith('Several')) ? ` · also heard: ${who.join(', ')}` : ''));
+        if (p.tone === 'bad') why.append(' ', watchButton(p.startMs - 1000, p.endMs + 1000, `Transcript at ${fmtRange(p.startMs, p.endMs)}: “${p.text.slice(0, 60)}${p.text.length > 60 ? '…' : ''}”`, 'Watch'));
+        line.append(why);
+      }
+      list.append(line);
+    }
+    node.append(list, el('p', { class: 'muted' }, t.note));
+  });
 }
 
 function renderMoment(view: ReviewerView): void {
@@ -764,7 +801,7 @@ function render(view: ReviewerView): void {
   current = view;
   if (!selectedWindowId && view.evidence.length) selectedWindowId = view.evidence[0]!.windowId;
   renderHeader(view); renderStatus(view); renderEnrollment(view); renderCoverage(view);
-  renderTimeline(view); renderSignals(view); renderMoment(view); renderEvidence(view); renderGestures(view); renderChallenges(view); renderDanger(view);
+  renderTimeline(view); renderTranscript(view); renderSignals(view); renderMoment(view); renderEvidence(view); renderGestures(view); renderChallenges(view); renderDanger(view);
 }
 
 function formFocusedIn(node: HTMLElement): boolean {
@@ -803,7 +840,7 @@ else {
     el('div', { class: 'review-layout' },
       // Wide, nested content (re-evaluation versions, enrollment table) lives in the main column; the
       // narrow side column keeps only compact panels.
-      el('div', { class: 'review-main' }, sections.status, sections.timeline, sections.moment, sections.signals, sections.evidence, sections.challenges, sections.enrollment),
+      el('div', { class: 'review-main' }, sections.status, sections.timeline, sections.moment, sections.transcript, sections.signals, sections.evidence, sections.challenges, sections.enrollment),
       el('aside', { class: 'review-aside', 'aria-label': 'Gesture checks and coverage' }, sections.gestures, sections.coverage)),
     sections.danger);
   const params = new URLSearchParams(location.search);

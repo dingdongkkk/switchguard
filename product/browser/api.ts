@@ -8,7 +8,12 @@ import type {
 } from '../../src/shared/contracts.js';
 
 export type Status = 'consent' | 'enrollment' | 'ready' | 'live' | 'paused' | 'ended';
-export interface Consent { voiceAnalysis: boolean; camera: boolean; retention: boolean; atMs: number }
+export interface Consent { voiceAnalysis: boolean; camera: boolean; retention: boolean; atMs: number; transcript?: boolean }
+export interface TranscriptPhraseView {
+  id: string; startMs: number; endMs: number; text: string; tone: 'ok' | 'warn' | 'bad' | 'gap';
+  people: Array<{ person: number; seconds: number }>; reasons: string[]; windowId?: string;
+}
+export interface TranscriptView { enabled: boolean; phrases: TranscriptPhraseView[]; redCount: number; note: string }
 export interface CandidateView {
   sessionId: string; displayName: string; status: Status; kind: 'interview' | 'sandbox';
   consent?: Consent; enrolled: boolean; enrollmentAttempts: number;
@@ -60,6 +65,7 @@ export interface ReviewerView {
   voiceSignals: VoiceSignalView[];
   targetedChecks: { used: number; max: number };
   gestureChecks: GestureCheckView[];
+  transcript?: TranscriptView;
 }
 export interface SessionSummary {
   sessionId: string; kind: 'interview' | 'sandbox'; displayName: string; status: Status;
@@ -264,7 +270,7 @@ export const api = {
   reviewer: (a: Auth, id: string) => request<ReviewerView>(a, 'GET', `/api/sessions/${id}`),
   candidate: (a: Auth, id: string) => request<CandidateView>(a, 'GET', `/api/sessions/${id}/candidate`),
   clock: (a: Auth, id: string) => request<{ sessionMs: number }>(a, 'GET', `/api/sessions/${id}/clock`),
-  consent: (a: Auth, id: string, c: { voiceAnalysis: boolean; camera: boolean; retention: boolean }) => request<CandidateView>(a, 'POST', `/api/sessions/${id}/consent`, c),
+  consent: (a: Auth, id: string, c: { voiceAnalysis: boolean; camera: boolean; retention: boolean; transcript?: boolean }) => request<CandidateView>(a, 'POST', `/api/sessions/${id}/consent`, c),
   enroll: (a: Auth, id: string, wav: Uint8Array, startMs: number, endMs: number, opId?: string) =>
     uploadWav<{ accepted: boolean; reason: string; attempt: EnrollmentAttempt }>(a, `/api/sessions/${id}/enrollment`, wav, { startMs, endMs }, opId),
   control: (a: Auth, id: string, action: 'start' | 'pause' | 'resume' | 'end') => request<CandidateView>(a, 'POST', `/api/sessions/${id}/control`, { action }),
@@ -277,6 +283,8 @@ export const api = {
   video: (a: Auth, id: string, clip: Blob, startMs: number, endMs: number) =>
     request<{ mediaName: string; evicted: string[] }>(a, 'POST', `/api/sessions/${id}/video`, clip, {
       'content-type': clip.type || 'video/webm', 'x-capture-metadata': encodeURIComponent(JSON.stringify({ startMs, endMs })) }),
+  transcript: (a: Auth, id: string, phrases: Array<{ id: string; startMs: number; endMs: number; text: string }>) =>
+    request<{ accepted: number }>(a, 'POST', `/api/sessions/${id}/transcript`, { phrases }),
   thumbnail: (a: Auth, id: string, jpeg: Blob, atMs: number) =>
     request<{ ok: true }>(a, 'POST', `/api/sessions/${id}/thumbnails`, jpeg, { 'content-type': 'image/jpeg', 'x-at-ms': String(Math.round(atMs)) }),
   resolve: (a: Auth, id: string, evidenceId: string, r: { disposition: ReviewerResolution['disposition']; notes: string; reviewerId: string }) =>

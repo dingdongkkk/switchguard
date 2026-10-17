@@ -253,6 +253,7 @@ export function createRequestHandler(service: SwitchGuardService, options: AppOp
           const bytes = await audio(), meta = captureMeta(req);   // content type is checked first
           return { status: 202, body: await service.submitWindow(rec, bytes, meta, op()) };
         }
+        if (sub === '/transcript' && method === 'POST') { const rec = session(req, id, 'candidate'); return { status: 200, body: service.addTranscript(rec, await jsonOnce()) }; }
         if (sub === '/interruptions' && method === 'POST') { const rec = session(req, id, 'candidate'); service.candidateInterruption(rec, await jsonOnce()); return { status: 200, body: { ok: true } }; }
         if (sub === '/thumbnails' && method === 'POST') {
           const rec = session(req, id, 'candidate');

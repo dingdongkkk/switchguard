@@ -42,6 +42,7 @@ Server: `product/server/app.ts` (owned by the main Claude session). Browser page
 | POST | `/api/sessions/:id/video` | C | raw complete `video/webm` or `video/mp4` clip (≤4 MB, ≤30 s), `x-capture-metadata` = `{startMs,endMs}`; needs camera consent and a live/paused session | `{ mediaName, evicted: string[] }` |
 | GET | `/api/sessions/:id/evidence/:evidenceId/context` | R | – | `VideoContext` (clips ±5 s with explicit gaps) |
 | POST | `/api/sessions/:id/thumbnails` | C | raw `image/jpeg` (≤200 KB), header `x-at-ms` | `{ ok: true }` |
+| POST | `/api/sessions/:id/transcript` | C | `{ phrases: [{ id, startMs, endMs, text }] }` (1–20, needs `consent.transcript`, live/paused/ended; idempotent by id) | `{ accepted }` |
 | GET | `/api/sessions/:id/media/:name` | R | – | `audio/wav` or `image/jpeg` (404 after deletion/retention purge) |
 | POST | `/api/sessions/:id/evidence/:evidenceId/resolutions` | R | `{ disposition: 'request_reverification'\|'reviewed'\|'escalate', notes, reviewerId }` | `ReviewerView` |
 | POST | `/api/sessions/:id/challenges` | R | `{ reason? }` | `ReviewerView` (compatibility: same as a reviewer review request) |

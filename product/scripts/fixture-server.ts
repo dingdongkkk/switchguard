@@ -50,7 +50,7 @@ let clock = Date.now() - 10 * 60_000;
 const service = new SwitchGuardService(new DetectifClient('fixture', fake, async () => {}), { ...defaultConfig(mkdtempSync(join(tmpdir(), 'sg-fixture-'))), provenance: 'test_fixture', now: () => clock });
 
 const rec = service.createSession({ displayName: 'Fixture candidate (TEST DATA)' });
-service.consent(rec, { voiceAnalysis: true, camera: true, retention: true });
+service.consent(rec, { voiceAnalysis: true, camera: true, retention: true, transcript: true });
 clock += 30_000;
 await service.enroll(rec, speechLike(20), { startMs: 5000, endMs: 25000 }, 'fixture-enroll-1');
 service.control(rec, 'start');
@@ -75,6 +75,16 @@ clock = rec.session.createdAtEpochMs + t; service.startAnswer(rec, 'q5');
 { mode = { decision: 'no_match', verdict: 'real' }; clock = rec.session.createdAtEpochMs + t + 15_100;
   await service.submitWindow(rec, speechLike(15, 150, VOICE_C), { startMs: t, endMs: t + 15_000 }, `fixture-third-${t}`); await service.idle(); t += 15_000; }
 clock += 10; service.endAnswer(rec);
+// Live transcript phrases (TEST DATA text) laid over the timeline above.
+clock = rec.session.createdAtEpochMs + t + 1000;
+service.addTranscript(rec, { phrases: [
+  [32_400, 38_000, 'Test data: I have spent four years building backend services.'], [38_800, 45_500, 'Mostly payments and the systems around them.'],
+  [47_900, 54_000, 'For the technical problem I picked a slow checkout page.'], [55_000, 61_000, 'We profiled it and found the database calls were the issue.'],
+  [62_000, 68_000, 'Then we added caching in front of the hot queries.'], [73_400, 79_600, 'When I disagreed with a teammate we wrote both options down.'],
+  [80_400, 86_500, 'And we picked the one that was easier to roll back.'], [88_900, 95_000, 'To scale ten times I would first measure where time goes.'],
+  [96_200, 103_000, 'Then shard the write path and add a queue for spikes.'], [105_400, 112_000, 'I would also add load tests before every release.'],
+  [112_600, 119_500, 'And alerts on latency, not only on errors.'],
+].map(([startMs, endMs, text], i) => ({ id: `p-fixture-${i}`, startMs, endMs, text })) });
 // Test-pattern video clips (ffmpeg testsrc, NOT a person) every 5 s across the interview, with one
 // deliberate 2 s hole, so the reviewer's video-context panel and its gap reporting can be checked.
 try {

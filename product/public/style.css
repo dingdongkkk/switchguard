@@ -30,3 +30,17 @@ body.workspace .judge-banner { margin: 16px 40px 0; }
 .ai-bad .ai-fill { background: var(--bad); }
 .ai-threshold { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); opacity: .45; border-radius: 1px; }
 .link-button { background: none; border: 0; padding: 0; min-height: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }
+/* Live transcript: red = another person, AI voice or flagged; amber = not sure. */
+.tx-legend { flex-wrap: wrap; margin: 6px 0 12px; }
+.tx-list { max-height: 460px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px; padding: 6px 0; margin: 10px 0; }
+.tx-line { display: grid; grid-template-columns: 56px 1fr; gap: 2px 12px; padding: 7px 14px; font-size: 13px; line-height: 1.55; }
+.tx-time { font-size: 11px; color: var(--muted); text-decoration: none; font-variant-numeric: tabular-nums; justify-self: start; }
+.tx-time:disabled { cursor: default; }
+.tx-text { color: var(--text); }
+.tx-gap .tx-text { color: var(--muted); }
+.tx-bad { background: var(--bad-bg); }
+.tx-bad .tx-text { color: var(--bad); font-weight: 550; }
+.tx-warn .tx-text { color: var(--warn); }
+.tx-why { grid-column: 2; font-size: 11px; color: var(--bad); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tx-warn .tx-why { color: var(--warn); }
+.tx-why button { min-height: 0; padding: 3px 9px; font-size: 11px; }
