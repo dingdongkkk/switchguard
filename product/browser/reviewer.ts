@@ -357,7 +357,7 @@ function renderTranscript(view: ReviewerView): void {
       const target = p.windowId;
       if (target) time.addEventListener('click', () => select(target)); else time.disabled = true;
       const who = p.people.filter((x) => x.person !== 1).map((x) => personName(x.person));
-      const line = el('div', { class: `tx-line tx-${p.tone}` }, time, el('span', { class: 'tx-text' }, p.text));
+      const line = el('div', { class: `tx-line tx-${p.tone}` }, time, el('span', { class: 'tx-text' }, p.source === 'reevaluation' ? el('span', { class: 'tx-tag' }, 'Re-evaluation phrase') : '', p.text));
       if (p.tone === 'bad' || p.tone === 'warn') {
         const why = el('div', { class: 'tx-why' }, p.reasons.join(' · ') + (who.length && !p.reasons.some((r) => r.startsWith('Person') || r.startsWith('Several')) ? ` · also heard: ${who.join(', ')}` : ''));
         if (p.tone === 'bad') why.append(' ', watchButton(p.startMs - 1000, p.endMs + 1000, `Transcript at ${fmtRange(p.startMs, p.endMs)}: “${p.text.slice(0, 60)}${p.text.length > 60 ? '…' : ''}”`, 'Watch'));

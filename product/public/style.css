@@ -44,3 +44,4 @@ body.workspace .judge-banner { margin: 16px 40px 0; }
 .tx-why { grid-column: 2; font-size: 11px; color: var(--bad); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .tx-warn .tx-why { color: var(--warn); }
 .tx-why button { min-height: 0; padding: 3px 9px; font-size: 11px; }
+.tx-tag { display: inline-block; font-size: 10px; font-weight: 500; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; margin-right: 6px; vertical-align: 1px; }

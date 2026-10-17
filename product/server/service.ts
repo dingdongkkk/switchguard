@@ -696,15 +696,26 @@ export class SwitchGuardService {
     for (const sig of result.signals) {
       const startMs = bufferStartMs + sig.startSec * 1000, endMs = Math.min(bufferStartMs + sig.endSec * 1000, w.endMs);
       if (endMs - startMs < 1000) continue;
-      // The boundary pass re-reads the previous tail: skip stretches already reported.
-      if (signals.some(o => o.kind === sig.kind && Math.min(o.endMs, endMs) - Math.max(o.startMs, startMs) > 0.5 * (endMs - startMs))) continue;
-      const record: VoiceSignalRecord = { id: `vs${signals.length + 1}`, kind: sig.kind, startMs, endMs, strength: Math.round(sig.strength * 100) / 100, detail: sig.detail,
-        windowIds: [prevId && startMs < w.startMs ? prevId : undefined, w.id].filter((x): x is string => !!x), atMs: this.elapsed(rec) };
-      signals.push(record);
+      const windowIds = [prevId && startMs < w.startMs ? prevId : undefined, w.id].filter((x): x is string => !!x);
+      // The boundary pass re-reads the previous tail: a stretch already reported is merged into that
+      // signal, and re-checked only when the merge adds at least 2 s the earlier check did not hear.
+      const dup = signals.find(o => o.kind === sig.kind && Math.min(o.endMs, endMs) - Math.max(o.startMs, startMs) > 0.5 * Math.min(endMs - startMs, o.endMs - o.startMs));
+      let record: VoiceSignalRecord;
+      if (dup) {
+        const added = Math.max(0, endMs - dup.endMs) + Math.max(0, dup.startMs - startMs);
+        dup.startMs = Math.min(dup.startMs, startMs); dup.endMs = Math.max(dup.endMs, endMs);
+        dup.windowIds = [...new Set([...dup.windowIds, ...windowIds])];
+        dup.strength = Math.max(dup.strength, Math.round(sig.strength * 100) / 100);
+        if (added < 2000) continue;
+        record = dup; record.targetedSkipped = undefined;
+      } else {
+        record = { id: `vs${signals.length + 1}`, kind: sig.kind, startMs, endMs, strength: Math.round(sig.strength * 100) / 100, detail: sig.detail, windowIds, atMs: this.elapsed(rec) };
+        signals.push(record);
+      }
       if ((rec.targetedChecks ?? 0) >= this.config.maxTargetedChecks) { record.targetedSkipped = `Targeted-check budget (${this.config.maxTargetedChecks} per session) used up — listen to this stretch`; continue; }
       if (typeof this.lastBalance === 'number' && this.lastBalance < this.config.lowCreditThreshold) { record.targetedSkipped = `DetectifAI credits are low (${this.lastBalance} left) — targeted check skipped; listen to this stretch`; continue; }
       // Clip = suspicious stretch ± 0.5 s, at least 4.5 s (combined checks need > 4 s), at most 15 s.
-      let a = Math.max(0, Math.floor(((startMs - 500 - bufferStartMs) / 1000) * 16_000)), b = Math.min(buffer.length, Math.ceil(((endMs + 500 - bufferStartMs) / 1000) * 16_000));
+      let a = Math.max(0, Math.floor(((record.startMs - 500 - bufferStartMs) / 1000) * 16_000)), b = Math.min(buffer.length, Math.ceil(((record.endMs + 500 - bufferStartMs) / 1000) * 16_000));
       const min = 4.5 * 16_000, max = 15 * 16_000;
       while (b - a < min && (a > 0 || b < buffer.length)) { a = Math.max(0, a - 1600); b = Math.min(buffer.length, b + 1600); }
       if (b - a > max) b = a + max;
@@ -963,7 +974,13 @@ export class SwitchGuardService {
   transcriptView(rec: ProductRecord) {
     const slices = rec.speakerSlices ?? [], windows = rec.session.windows;
     const flagged = new Set(rec.session.evidence.map(e => e.windowId));
-    const phrases = (rec.transcript ?? []).map(p => {
+    // Re-evaluation phrases are recorded separately (Chrome runs one recogniser); show them in place.
+    const reevaluation = rec.session.challenges.flatMap(c => {
+      const text = rec.challengeMeta[c.id]?.transcript, w = c.resultWindowId ? windows.find(x => x.id === c.resultWindowId) : undefined;
+      return text && w ? [{ id: `c-${c.id}`, startMs: w.startMs, endMs: w.endMs, text, source: 'reevaluation' as const }] : [];
+    });
+    const all = [...(rec.transcript ?? []).map(p => ({ ...p, source: 'live' as const })), ...reevaluation].sort((a, b) => a.startMs - b.startMs);
+    const phrases = all.map(p => {
       const dur = Math.max(1, p.endMs - p.startMs);
       const secs = new Map<number, number>();
       for (const sl of slices) { const o = Math.min(sl.e, p.endMs) - Math.max(sl.s, p.startMs); if (o > 0) secs.set(sl.p, (secs.get(sl.p) ?? 0) + o); }
@@ -972,13 +989,13 @@ export class SwitchGuardService {
       const reasons: string[] = [];
       let tone: 'ok' | 'warn' | 'bad' | 'gap' = voiced > 0 ? 'ok' : 'gap';
       for (const { person, seconds } of people) {
-        if (person === 1 || !(seconds * 1000 >= 750 || seconds * 1000 >= voiced * 0.3)) continue;
+        if (person === 1 || !(seconds * 1000 >= 750 || seconds * 1000 >= voiced * 0.25)) continue;   // any real stretch turns the whole phrase red
         reasons.push(person === 0 ? 'Several voices at once' : `Person ${person} speaking (not the enrolled voice)`); tone = 'bad';
       }
       let windowId: string | undefined;
       for (const w of windows) {
         const o = Math.min(w.endMs, p.endMs) - Math.max(w.startMs, p.startMs);
-        if (o <= 0 || o < Math.min(1000, dur * 0.5)) continue;
+        if (o <= 0 || o < Math.min(500, dur * 0.3)) continue;   // any real overlap with a checked window counts
         const r = rec.session.results.find(x => x.windowId === w.id);
         if (flagged.has(w.id)) { windowId ??= w.id; if (!reasons.some(x => x.startsWith('Flagged'))) reasons.push(`Flagged by DetectifAI (window #${w.sequence})`); tone = 'bad'; }
         if (r?.authenticity.status === 'complete' && r.authenticity.verdict === 'fake') { windowId ??= w.id; if (!reasons.includes('Synthetic (AI) voice verdict')) reasons.push('Synthetic (AI) voice verdict'); tone = 'bad'; }

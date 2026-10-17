@@ -11,7 +11,7 @@ export type Status = 'consent' | 'enrollment' | 'ready' | 'live' | 'paused' | 'e
 export interface Consent { voiceAnalysis: boolean; camera: boolean; retention: boolean; atMs: number; transcript?: boolean }
 export interface TranscriptPhraseView {
   id: string; startMs: number; endMs: number; text: string; tone: 'ok' | 'warn' | 'bad' | 'gap';
-  people: Array<{ person: number; seconds: number }>; reasons: string[]; windowId?: string;
+  people: Array<{ person: number; seconds: number }>; reasons: string[]; windowId?: string; source?: 'live' | 'reevaluation';
 }
 export interface TranscriptView { enabled: boolean; phrases: TranscriptPhraseView[]; redCount: number; note: string }
 export interface CandidateView {

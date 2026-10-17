@@ -770,7 +770,7 @@ function startLiveTranscript(): void {
   const sync = () => {
     const allowed = !!view?.consent?.transcript && !!SpeechRecognitionCtor;
     if (allowed && !liveTranscript) {
-      liveTranscript = new LiveTranscriber(target.auth, target.sessionId, clock, { onError: showError });
+      liveTranscript = new LiveTranscriber((phrases) => api.transcript(target.auth, target.sessionId, phrases), clock, { onError: showError, voiceLevel: () => (capture?.healthy ? meterFraction(capture.level) : 0) });
       window.addEventListener('pagehide', () => void liveTranscript?.flush());
     }
     if (!liveTranscript) { state.hidden = true; return; }

@@ -172,6 +172,22 @@ function distance(vec: number[], p: VoiceProfile): number {
   return Math.sqrt(s / vec.length);
 }
 
+// ---------------------------------------------------------------- scoring
+/** Timbre distance at which a slice no longer sounds like the reference: well outside the reference's
+ * own slice-to-slice variation. The floor is low because real microphones put a different voice only
+ * ~0.6–0.9 from the reference on this scale (a fixed 1.5 floor never fired on live audio). */
+export function timbreThreshold(p: VoiceProfile): number { return Math.max(p.segDistMean + 4 * p.segDistStd, 0.55); }
+/** Octaves of pitch shift tolerated as ordinary intonation before it counts toward "different". */
+const PITCH_FREE = 0.15, PITCH_WEIGHT = 2;
+/** A slice is "different" above this combined score (1 = timbre exactly at the threshold). */
+export const DIFFERENT_SCORE = 1.05;
+/** Combined score: timbre beyond the reference baseline, plus pitch moved beyond normal intonation.
+ * Either a large timbre change or a moderate timbre change with a clear pitch jump crosses it. */
+export function sliceScore(d: number, f0: number | undefined, p: VoiceProfile, threshold: number): number {
+  const pitchShift = f0 && Number.isFinite(p.f0Median) ? Math.abs(Math.log2(f0 / p.f0Median)) : 0;
+  return d / threshold + Math.max(0, pitchShift - PITCH_FREE) * PITCH_WEIGHT;
+}
+
 // ---------------------------------------------------------------- profile & analysis
 export function buildProfile(x16k: Float32Array): VoiceProfile | undefined {
   const fr = frames(x16k), v = fr.filter(voiced);
@@ -192,17 +208,16 @@ export function analyse(x16k: Float32Array, profile: VoiceProfile): VoiceAnalysi
   const fr = frames(x16k);
   // Timbre must sit well outside the reference's own slice-to-slice variation, with an absolute floor
   // so ordinary intonation and loudness changes from the same person do not trigger it.
-  const threshold = Math.max(profile.segDistMean + 4 * profile.segDistStd, 1.5);
+  const threshold = timbreThreshold(profile);
   const slices: SliceAnalysis[] = [];
   const last = Math.max(0, fr.length - SEG_FRAMES);
   for (let i = 0; i <= last; i += SEG_HOP) {
     const s = sliceStats(fr, i);
     if (!s.vec) continue;
     const d = distance(s.vec, profile);
-    const pitchShift = s.f0Median && Number.isFinite(profile.f0Median) ? Math.abs(Math.log2(s.f0Median / profile.f0Median)) : 0;
-    // Timbre far outside the reference's own spread, or a large pitch shift with some timbre change.
-    const different = d > threshold || (pitchShift > 0.5 && d > threshold * 0.7);
-    slices.push({ startSec: (i * HOP) / RATE, endSec: ((i + Math.min(SEG_FRAMES, fr.length - i)) * HOP + FRAME) / RATE, distance: d / threshold, f0Median: s.f0Median, voicedRatio: s.voicedRatio, multi: s.multi, different, vec: s.vec.map((v) => Math.round(v * 1000) / 1000) });
+    const score = sliceScore(d, s.f0Median, profile, threshold);
+    const different = score > DIFFERENT_SCORE;
+    slices.push({ startSec: (i * HOP) / RATE, endSec: ((i + Math.min(SEG_FRAMES, fr.length - i)) * HOP + FRAME) / RATE, distance: score, f0Median: s.f0Median, voicedRatio: s.voicedRatio, multi: s.multi, different, vec: s.vec.map((v) => Math.round(v * 1000) / 1000) });
   }
   const signals: VoiceSignal[] = [];
   const runs = (pick: (s: SliceAnalysis) => boolean, kind: VoiceSignal['kind']) => {
@@ -212,7 +227,7 @@ export function analyse(x16k: Float32Array, profile: VoiceProfile): VoiceAnalysi
         const strength = Math.max(...run.map((s) => s.distance));
         signals.push({ kind, startSec: run[0]!.startSec, endSec: run.at(-1)!.endSec, strength,
           detail: kind === 'multiple_voices_suspected' ? 'Pitch alternates rapidly between two distinct levels, as when two people take quick turns or talk over each other.'
-            : `Different voice, or more than one voice: timbre ${strength.toFixed(1)}× beyond the reference's own variation${run.some((s) => s.f0Median) ? `; pitch ≈${Math.round(median(run.map((s) => s.f0Median ?? NaN).filter(Number.isFinite)))} Hz vs reference ≈${Math.round(profile.f0Median)} Hz` : ''}.` });
+            : `Voice unlike the reference (difference ${strength.toFixed(1)}, over 1 = different)${run.some((s) => s.f0Median) ? `; pitch ≈${Math.round(median(run.map((s) => s.f0Median ?? NaN).filter(Number.isFinite)))} Hz vs ${Math.round(profile.f0Median)} Hz` : ''}.` });
       }
       run = [];
     };
@@ -240,7 +255,8 @@ function zDistance(a: number[], b: number[], p: VoiceProfile): number {
 /** Assigns each slice to Person 1 (reference), an existing extra person, or a new person (up to
  * `maxPeople`). Slices with two voices at once are 'several'. Clusters are updated in place. */
 export function assignSpeakers(slices: SliceAnalysis[], profile: VoiceProfile, clusters: SpeakerCluster[], maxPeople = 6): SliceSpeaker[] {
-  const threshold = Math.max(profile.segDistMean + 4 * profile.segDistStd, 1.5);
+  // Separating two extra voices from each other uses a wider margin than "not the reference".
+  const threshold = Math.max(timbreThreshold(profile) * 1.6, 1);
   if (!clusters.some((c) => c.person === 1)) clusters.unshift({ person: 1, centroid: [...profile.mean], f0: profile.f0Median, slices: 0 });
   const known = new Set(clusters.map((c) => c.person));
   const labels = slices.map((slice) => label(slice));
