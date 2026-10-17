@@ -27,12 +27,12 @@ Keep this log concise and current. Put detailed verification and the project com
 
 ### Coordinator — Codex
 
-- **Status:** active — building Team 08's Canva pitch presentation.
-- **Building now:** presentation and source review artifacts only in `artifacts/`; no product code edits. Canva generation includes team introduction, interview-assistance problem, all current features, speaker-switch timeline, voice-tool examples and future copilot-blocking roadmap.
-- **Built:** reviewed current foundation, product service/routes, media, voice grouping, gestures, reviewer/sandbox/report and deployment/storage paths. Saved `artifacts/PITCH_REVIEW.md` and `artifacts/CANVA_PITCH_BRIEF.md`. Earlier editorial UI and Three.js ribbon remain implemented.
-- **Verified:** latest `npm test` passed 75 tests (23 foundation + 52 product); `npm run check` passed. No live Detectif or biometric uploads in this review.
-- **Unfinished / limitations:** finish Canva generation, inspect pages, verify animation/export availability. Real-human accuracy remains unverified. Gesture and shared-storage features now exist despite stale prior documentation. Copilot blocking is future scope only; named synthetic voice tools have not been individually validated.
-- **Resume with:** finish the 18-slide Canva generation job and produce editable deck/PPT export if available; keep current product code unchanged.
+- **Status:** handed off — current-code priority audit complete (17 October 2026).
+- **Building now:** none; only documentation changed, product implementation untouched.
+- **Built:** `artifacts/PRIORITY_AUDIT.md` ranks durable job recovery, interval coverage, independent phrase validation, human evaluation, tenant isolation, transactional metadata and shared resource budgets. Current gesture enum has five prompts; older six-prompt descriptions are stale.
+- **Verified:** `npm test` passed 77 fixture tests (23 foundation + 54 product); `npm run check` passed. Direct compiled-code reproduction: 21 s of continuous coverage with a nested 5 s targeted window reports 26 s and a false 10–14 s gap. No live provider calls or biometric uploads.
+- **Unfinished / limitations:** findings are not fixed. Serverless recovery concern is source-backed, not a deployed crash test. Real-human accuracy/live acceptance remain unverified. Existing AGENTS.md/BUILD_STATUS.md changes preserved.
+- **Resume with:** use `artifacts/PRIORITY_AUDIT.md`; fix interval arithmetic first, then implement durable job recovery and independently verified challenge transcription. Coordinate product ownership before implementation.
 
 ### Astra — foundation Jobs 1–2
 
@@ -45,9 +45,9 @@ Keep this log concise and current. Put detailed verification and the project com
 
 ### Claude Code — product Jobs 3–8
 
-- **Status:** active. At the user's request, also finished Astra's open foundation items (handed off at its usage limit). Did not rename any shared export. Kept edits to Codex's redesigned pages minimal and additive (`candidate.ts` video lifecycle + consent copy, `reviewer.ts` video panel, `api.ts` video call/types).
+- **Status:** active (17 October 2026).
 - **Building now:** nothing; checkpoint recorded.
-- **Built:** product server/API for Jobs 3–8 (`product/server/*`); synchronized video context (`product/browser/video-recorder.ts`, `POST /video`, rolling buffer, evidence context via `ContextBuffer`); root `Dockerfile`/`.dockerignore`; `product/DEMO.md`; live smoke scripts; fixture preview server with test-pattern video.
-- **Verified:** `npm test` → 43 passed (23 foundation + 20 product). `npm run check` clean. Live Detectif: health ok, 1,650 credits (read-only). Earlier TTS plumbing checks per `product/README.md`. Production runtime layout booted (pages 200, API 401 without token, refuses start without `REVIEWER_TOKEN`). Video panel checked in the browser with fixture clips.
-- **Unfinished / limitations:** no consenting-human live run (needs a person + Chrome). Gestures not implemented. Docker image not built (daemon off). No presentation deck.
-- **Resume with:** follow `product/DEMO.md` for one consenting live run and record the outcome in `BUILD_STATUS.md`.
+- **Built:** product server/API, voice grouping, gestures, video context, Vercel deployment. Judge demo mode (`JUDGE_DEMO=1`): `/` opens without a token, scoped to demo sessions (`product/server/app.ts`, `product/browser/api.ts`). Vercel Blob hit the Hobby 2,000 advanced-operation quota and was paused for 30 days, so production now uses `SupabaseStore` (`product/server/store.ts`, schema `product/server/supabase.sql`) via `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`; Blob remains the fallback.
+- **Verified:** `npm test` → 82 passed (23 foundation + 59 product, Supabase store against a fake REST server). Live: `/api/health` reports store `supabase` ok; judge can create/read demo sessions, unauthenticated read is 401, anon Supabase REST is 401, bucket round trip ok.
+- **Unfinished / limitations:** DetectifAI credits are 0, so live provider checks fail closed. No consenting-human live run. Old Blob data (207 MB) is unreachable until the pause lifts.
+- **Resume with:** fund a DetectifAI key, then follow `product/DEMO.md` for one live run on https://switchguard-chi.vercel.app.
