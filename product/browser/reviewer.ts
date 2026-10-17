@@ -10,7 +10,6 @@ import {
 } from './render.js';
 
 const auth = await requireReviewer();
-const token = 'reviewerToken' in auth ? auth.reviewerToken : '';
 const sessionId = sessionIdFromQuery();
 const app = $('app');
 clear(app);
@@ -711,7 +710,7 @@ function renderDanger(view: ReviewerView): void {
     const exp = el('button', { type: 'button' }, 'Export JSON');
     exp.addEventListener('click', async () => {
       if (!sessionId) return;
-      try { await downloadExport(token, sessionId); } catch (e) { status.append(notice(errorText(e), 'bad')); }
+      try { await downloadExport(auth, sessionId); } catch (e) { status.append(notice(errorText(e), 'bad')); }
     });
     node.append(el('h2', {}, 'Data and export'),
       el('div', { class: 'muted' }, `Media is reviewer-only and retained for ${view.retention.mediaRetentionHours} h.`),

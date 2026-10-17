@@ -35,7 +35,7 @@ const handle = createRequestHandler(service, {
   reviewerToken: process.env.REVIEWER_TOKEN && process.env.REVIEWER_TOKEN.length >= 16 ? process.env.REVIEWER_TOKEN : randomBytes(32).toString('hex'),
   root: process.cwd(),
   allowedHosts: hosts,
-  trustProxy: true,
+  trustProxy: true, judgeDemo: process.env.JUDGE_DEMO === '1',
   accessLog: process.env.ACCESS_LOG !== '0',
   cronSecret: process.env.CRON_SECRET,
 });

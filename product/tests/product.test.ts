@@ -923,3 +923,73 @@ test('video around a voice switch is kept even when nothing was flagged by Detec
   assert.ok(kept.includes(30_000) && kept.includes(35_000) && kept.includes(40_000), JSON.stringify(kept.slice(0, 6)));
   assert.ok(!kept.includes(100_000), 'unrelated old video is still dropped');
 });
+
+// ---------------------------------------------------------------- judge demo (open without login)
+async function bootJudge(judgeDemo: boolean, overrides: Partial<ReturnType<typeof defaultConfig>> = {}) {
+  await close();
+  const client = new DetectifClient('detectif-test', fakeFetch, async () => {});
+  service = new SwitchGuardService(client, { ...defaultConfig(dataDir), provenance: 'test_fixture', now: () => clock, ...overrides });
+  const server = createProductApp(service, { reviewerToken: TOKEN, root: resolve(process.cwd(), '..'), judgeDemo });
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; close = () => new Promise(r => server.close(() => r()));
+}
+const judge = (method: string, path: string, json?: unknown) => fetch(base + path, { method, headers: { 'x-demo': '1', ...(json ? { 'content-type': 'application/json' } : {}) }, body: json ? JSON.stringify(json) : undefined })
+  .then(async r => ({ status: r.status, body: await r.json().catch(() => undefined) as any }));
+
+test('judge demo: opens without a token, sees and works only with demo sessions', async () => {
+  await bootJudge(true);
+  assert.deepEqual((await (await fetch(`${base}/api/demo`)).json()), { enabled: true });
+  const real = (await call('POST', '/api/sessions', { reviewer: true, json: { displayName: 'Real candidate' } })).body.sessionId;
+  const list0 = await judge('GET', '/api/sessions');
+  assert.equal(list0.status, 200);
+  assert.equal(list0.body.role, 'judge');
+  assert.equal(list0.body.sessions.length, 0, 'real sessions are invisible to judges');
+  // Real and unknown sessions answer the same way, so a judge learns nothing about them.
+  assert.equal((await judge('GET', `/api/sessions/${real}`)).status, 401);
+  assert.equal((await judge('GET', `/api/sessions/${'0'.repeat(24)}`)).status, 401);
+  assert.equal((await judge('DELETE', `/api/sessions/${real}`)).status, 401, 'judges cannot touch real sessions');
+  assert.equal((await call('GET', `/api/sessions/${real}`, { reviewer: true })).status, 200, 'real session untouched');
+  const created = await judge('POST', '/api/sessions', { displayName: 'Judge test' });
+  assert.equal(created.status, 201);
+  const demoId = created.body.sessionId;
+  assert.equal((await judge('GET', '/api/sessions')).body.sessions.map((s: any) => s.sessionId).join(), demoId);
+  assert.equal((await judge('GET', `/api/sessions/${demoId}`)).status, 200);
+  assert.equal((await judge('POST', `/api/sessions/${demoId}/join`, { reviewerId: 'Judge' })).body.interviewer.reviewerId, 'Judge');
+  // The interviewer with the token still sees everything, demo sessions marked.
+  const full = (await call('GET', '/api/sessions', { reviewer: true })).body.sessions;
+  assert.equal(full.length, 2);
+  assert.equal(full.find((s: any) => s.sessionId === demoId).demo, true);
+  assert.equal((await judge('DELETE', `/api/sessions/${demoId}`)).status, 200);
+});
+
+test('judge demo is off unless enabled', async () => {
+  await bootJudge(false);
+  assert.deepEqual((await (await fetch(`${base}/api/demo`)).json()), { enabled: false });
+  assert.equal((await judge('GET', '/api/sessions')).status, 401);
+  assert.equal((await judge('POST', '/api/sessions', { displayName: 'x' })).status, 401);
+});
+
+test('judge demo limits: concurrent sessions, provider checks per session, 24 h lifetime', async () => {
+  await bootJudge(true, { demoMaxSessions: 2, demoMaxChecks: 1 });
+  const a = (await judge('POST', '/api/sessions', { displayName: 'A' })).body;
+  await judge('POST', '/api/sessions', { displayName: 'B' });
+  const third = await judge('POST', '/api/sessions', { displayName: 'C' });
+  assert.equal(third.status, 429);
+  assert.equal(third.body.error.code, 'demo_limit');
+  // Per-session check cap: the second window is not sent to DetectifAI.
+  const id = a.sessionId, key = a.candidateKey;
+  await call('POST', `/api/sessions/${id}/consent`, { key, json: { voiceAnalysis: true, retention: true } });
+  clock += 25_000;
+  await call('POST', `/api/sessions/${id}/enrollment`, { key, wav: speechLike(20), meta: { startMs: 1000, endMs: 21000 } });
+  await call('POST', `/api/sessions/${id}/control`, { key, json: { action: 'start' } });
+  calls = [];
+  await rawWindow(id, key, 30_000, speechLike(15));
+  await rawWindow(id, key, 45_000, speechLike(15));
+  assert.equal(calls.filter(c => c.path === '/speakers/verify').length, 1);
+  const w = (await judge('GET', `/api/sessions/${id}`)).body.windows.filter((x: any) => !x.targetedFrom);
+  assert.match(w[1].reason, /Judge demo limit/);
+  // Demo sessions are deleted after 24 h even though real sessions are kept for 30 days.
+  clock += 25 * 3_600_000;
+  const r = await service.expireSessions();
+  assert.equal(r.deleted, 2);
+});

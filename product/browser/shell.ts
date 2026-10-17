@@ -41,7 +41,7 @@ if (candidate) {
   }
   aside.querySelector('.sidebar-create')!.prepend(icon('plus'));
   aside.querySelector('.sidebar-create')!.addEventListener('click',()=>{if(page==='home')document.dispatchEvent(new Event('sg:new-interview'));else location.href='/#new';});
-  aside.querySelector('.signout')!.addEventListener('click',()=>{sessionStorage.removeItem('sg.reviewerToken');location.href='/';});
+  aside.querySelector('.signout')!.addEventListener('click',()=>{sessionStorage.removeItem('sg.reviewerToken');sessionStorage.removeItem('sg.signIn');location.href='/';});
   document.body.prepend(aside);
   header.innerHTML='<div class="breadcrumbs"><span>Workspace</span><span class="breadcrumb-slash">/</span><strong></strong></div><div class="top-actions"><button class="guide-button" type="button">Review guide</button><span class="avatar small">R</span></div>';
   header.querySelector('.breadcrumbs strong')!.textContent={home:'Overview',reviewer:'Session review',sandbox:'Testing sandbox',report:'Evidence report',candidate:'Interview'}[page];

@@ -15,3 +15,8 @@
 .review-challenges .panel .panel { padding: 14px; }
 .review-timeline .row, .review-signals .row, .review-evidence .row { flex-wrap: wrap; }
 .review-signals td:last-child .row { flex-direction: column; align-items: stretch; }
+.judge-banner { margin: 12px 16px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.judge-banner button { margin-left: auto; }
+body.workspace .judge-banner { margin: 16px 40px 0; }
+@media (max-width: 1200px) { body.workspace .judge-banner { margin: 16px 28px 0; } }
+@media (max-width: 760px) { body.workspace .judge-banner { margin: 12px 20px 0; } }

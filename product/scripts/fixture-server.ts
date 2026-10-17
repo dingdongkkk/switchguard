@@ -128,7 +128,7 @@ for (let i = 0; i < 4; i++) { mode = { decision: i >= 2 ? 'no_match' : 'match', 
 mode = { decision: 'match', verdict: 'real' };
 
 const port = Number(process.env.PORT ?? 3101);
-createProductApp(service, { reviewerToken: 'fixture-reviewer', root }).listen(port, '127.0.0.1', () => {
+createProductApp(service, { reviewerToken: 'fixture-reviewer', root, judgeDemo: true }).listen(port, '127.0.0.1', () => {
   console.log(`FIXTURE server (scripted DetectifAI, provenance test_fixture): http://127.0.0.1:${port}  reviewer token: fixture-reviewer`);
   console.log(`interview: /reviewer.html?s=${rec.session.id}   candidate: /candidate.html#s=${rec.session.id}&k=${rec.candidateKey}   sandbox: /reviewer.html?s=${sb.session.id}`);
 });

@@ -47,7 +47,7 @@ const service = new SwitchGuardService(client, config);
 service.load();
 const purged = service.sweepRetention();
 
-const server = createProductApp(service, { reviewerToken, root, allowedHosts, trustProxy: process.env.TRUST_PROXY === '1', accessLog: process.env.ACCESS_LOG !== '0' });
+const server = createProductApp(service, { reviewerToken, root, allowedHosts, trustProxy: process.env.TRUST_PROXY === '1', judgeDemo: process.env.JUDGE_DEMO === '1', accessLog: process.env.ACCESS_LOG !== '0' });
 
 // Housekeeping: media retention every 5 minutes, whole-session expiry every hour.
 const sweep = setInterval(() => { try { service.sweepRetention(); } catch (error) { console.error('Retention sweep failed', error); } }, 5 * 60_000);

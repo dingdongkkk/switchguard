@@ -20,6 +20,9 @@ export interface AppOptions {
   trustProxy?: boolean;
   /** One JSON line per API request (no tokens, keys or query strings). */
   accessLog?: boolean;
+  /** Judge demo: requests with `x-demo: 1` (and no reviewer token) may create and work with demo
+   * sessions only. Real sessions stay behind the reviewer token. */
+  judgeDemo?: boolean;
   /** Shared secret for the scheduled housekeeping route (Vercel Cron). */
   cronSecret?: string;
   /** Per-IP limits; tests lower them. */
@@ -106,11 +109,18 @@ export function createRequestHandler(service: SwitchGuardService, options: AppOp
     return ok;
   };
   const isCandidate = (req: IncomingMessage, rec: ProductRecord) => equal(String(req.headers['x-session-key'] ?? ''), rec.candidateKey);
-  function reviewer(req: IncomingMessage): void { if (!isReviewer(req)) fail('unauthorized', 'Reviewer token required', 401); }
-  /** Unknown session and wrong key look identical, so session IDs cannot be probed. */
+  const isJudge = (req: IncomingMessage) => !!options.judgeDemo && req.headers['x-demo'] === '1' && !req.headers['x-reviewer-token'];
+  /** Full reviewer (token) or judge (demo sessions only). */
+  function reviewer(req: IncomingMessage): 'full' | 'judge' {
+    if (isReviewer(req)) return 'full';
+    if (isJudge(req)) return 'judge';
+    return fail('unauthorized', 'Reviewer token required', 401);
+  }
+  /** Unknown session and wrong key look identical, so session IDs cannot be probed. A judge sees
+   * demo sessions only; anything else looks like it does not exist. */
   function session(req: IncomingMessage, id: string, who: 'reviewer' | 'candidate' | 'either' | 'candidate_or_sandbox_reviewer'): ProductRecord {
     const rec = service.records.get(id);
-    const r = isReviewer(req), c = rec ? isCandidate(req, rec) : false;
+    const r = isReviewer(req) || (!!rec?.demo && isJudge(req)), c = rec ? isCandidate(req, rec) : false;
     const ok = rec && (who === 'reviewer' ? r : who === 'candidate' ? c : who === 'either' ? r || c : c || (r && rec.kind === 'sandbox'));
     if (!ok) fail(r || c || who !== 'reviewer' ? 'not_found' : 'unauthorized', r || c || who !== 'reviewer' ? 'Session not found' : 'Reviewer token required', r || c || who !== 'reviewer' ? 404 : 401);
     return rec!;
@@ -169,10 +179,15 @@ export function createRequestHandler(service: SwitchGuardService, options: AppOp
         send(res, 200, await service.sweepAll()); return;
       }
       if (path === '/api/ops' && method === 'GET') { reviewer(req); await service.pullAll(); send(res, 200, await service.ops()); return; }
-      if (path === '/api/sessions' && method === 'GET') { reviewer(req); await service.pullAll(); send(res, 200, { sessions: service.summaries() }); return; }
+      if (path === '/api/demo' && method === 'GET') { send(res, 200, { enabled: !!options.judgeDemo }); return; }
+      if (path === '/api/sessions' && method === 'GET') {
+        const role = reviewer(req); await service.pullAll();
+        send(res, 200, { sessions: service.summaries().filter(s => role === 'full' || s.demo), role }); return;
+      }
       if (path === '/api/sessions' && method === 'POST') {
-        reviewer(req);
-        const rec = service.createSession(await json(req));
+        const role = reviewer(req);
+        if (role === 'judge') await service.pullAll();   // the demo-session cap counts every instance's sessions
+        const rec = service.createSession({ ...(await json(req)), demo: role === 'judge' });
         await service.persistNew(rec.session.id);
         const view = service.reviewerView(rec);
         send(res, 201, { sessionId: rec.session.id, candidateKey: rec.candidateKey, candidateUrl: view.candidateUrl, view }); return;

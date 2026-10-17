@@ -107,6 +107,8 @@ export interface ProductRecord {
   usage: { providerCalls: number; creditsCharged: number };
   /** windowId → Detectif Idempotency-Key. Deterministic, so a restart retry never double-charges. */
   windowOps: Record<string, string>;
+  /** Created through the public judge demo: visible to judges, capped, and deleted after demoRetentionHours. */
+  demo?: boolean;
   /** Interviewer who joined this interview (reviewer token holder), if any. */
   interviewer?: { joinedAtMs: number; reviewerId: string };
   /** Local voice profile from the accepted reference (timbre + pitch statistics; no audio). */
@@ -143,6 +145,8 @@ export interface ServiceConfig {
   sessionRetentionDays: number;
   /** Below this last-reported credit balance, targeted voice checks are skipped (window checks continue). */
   lowCreditThreshold: number;
+  /** Judge demo limits: provider checks per demo session, concurrent demo sessions, and lifetime. */
+  demoMaxChecks: number; demoMaxSessions: number; demoRetentionHours: number;
   /** Shared storage for multi-instance hosting (Vercel Blob). Unset = single process, local disk. */
   sharedStore?: SharedStore;
   /** Run voice analysis on the request thread (serverless) instead of a worker thread. */
@@ -157,6 +161,7 @@ export const defaultConfig = (dataDir: string): ServiceConfig => ({
   maxTargetedChecks: Math.max(0, Number(process.env.TARGETED_CHECKS ?? 8) || 0), gestureWindowMs: 30_000,
   saveDelayMs: 250, sessionRetentionDays: Number(process.env.SESSION_RETENTION_DAYS ?? 30),
   lowCreditThreshold: Number(process.env.LOW_CREDIT_THRESHOLD ?? 300),
+  demoMaxChecks: Number(process.env.DEMO_MAX_CHECKS ?? 40), demoMaxSessions: Number(process.env.DEMO_MAX_SESSIONS ?? 25), demoRetentionHours: Number(process.env.DEMO_RETENTION_HOURS ?? 24),
 });
 
 export function fail(code: string, message: string, status = 400): never { throw new PipelineError(code, message, status); }
@@ -388,12 +393,12 @@ export class SwitchGuardService {
    * A failed remote deletion keeps the session and is retried on the next sweep. */
   async expireSessions(): Promise<{ deleted: number; failed: number }> {
     const days = this.config.sessionRetentionDays;
-    if (!(days > 0)) return { deleted: 0, failed: 0 };
-    const cutoff = this.config.now() - days * 86_400_000;
+    const cutoff = days > 0 ? this.config.now() - days * 86_400_000 : -Infinity;
+    const demoCutoff = this.config.now() - this.config.demoRetentionHours * 3_600_000;
     let deleted = 0, failed = 0;
     await this.pullAll();
     for (const rec of [...this.records.values()]) {
-      if (rec.session.createdAtEpochMs >= cutoff) continue;
+      if (rec.session.createdAtEpochMs >= (rec.demo ? demoCutoff : cutoff)) continue;
       if (rec.session.windows.some(w => w.coverage === 'pending')) continue;
       try { await this.deleteSession(rec); deleted++; }
       catch (error) { failed++; console.error(`Session ${rec.session.id} expired but could not be deleted yet: ${(error as Error).message}`); }
@@ -469,7 +474,9 @@ export class SwitchGuardService {
   }
 
   // ---------- sessions ----------
-  createSession(input: { displayName?: unknown; kind?: unknown; sandbox?: unknown }): ProductRecord {
+  createSession(input: { displayName?: unknown; kind?: unknown; sandbox?: unknown; demo?: boolean }): ProductRecord {
+    if (input.demo && [...this.records.values()].filter(r => r.demo).length >= this.config.demoMaxSessions)
+      fail('demo_limit', 'The judge demo is full right now; delete an old demo session or try again later', 429);
     if (this.records.size >= 500) fail('session_limit', 'Session limit reached; delete old sessions first', 429);
     const kind: Kind = input.kind === 'sandbox' ? 'sandbox' : 'interview';
     const id = randomBytes(12).toString('hex');
@@ -483,7 +490,7 @@ export class SwitchGuardService {
         switchOnsetSec: s.switchOnsetSec !== undefined && s.switchOnsetSec !== null && s.switchOnsetSec !== '' && Number.isFinite(onset) && onset >= 0 ? onset : undefined };
     }
     const rec: ProductRecord = { version: 1, session, kind, candidateKey: randomBytes(24).toString('hex'), speakerId: `sg-${id}`, status: 'consent',
-      enrollmentAttempts: [], media: [], challengeMeta: {}, sandbox, usage: { providerCalls: 0, creditsCharged: 0 }, windowOps: {}, operations: {}, reviewRequests: [] };
+      enrollmentAttempts: [], media: [], challengeMeta: {}, sandbox, usage: { providerCalls: 0, creditsCharged: 0 }, windowOps: {}, operations: {}, reviewRequests: [], ...(input.demo ? { demo: true } : {}) };
     this.records.set(id, rec); this.save(rec);
     return rec;
   }
@@ -618,7 +625,9 @@ export class SwitchGuardService {
     if (wav.durationMs > 60_000) fail('audio_too_long', 'Analysis windows must be at most 60 seconds', 422);
     const voiced = localSpeechSeconds(audio, wav.sampleRate);
     let coverage: AudioWindow['coverage'] = 'pending', reason: string | undefined;
-    if (wav.durationMs <= 4000) { coverage = 'skipped'; reason = `Short fragment (${(wav.durationMs / 1000).toFixed(1)} s): combined checking needs more than 4 s, so this interval was not checked`; }
+    const checksUsed = rec.session.windows.filter(x => rec.windowOps[x.id]).length;
+    if (rec.demo && checksUsed >= this.config.demoMaxChecks) { coverage = 'skipped'; reason = `Judge demo limit: ${this.config.demoMaxChecks} DetectifAI checks per demo session — this interval was not checked`; }
+    else if (wav.durationMs <= 4000) { coverage = 'skipped'; reason = `Short fragment (${(wav.durationMs / 1000).toFixed(1)} s): combined checking needs more than 4 s, so this interval was not checked`; }
     else if (voiced < 2) { coverage = 'skipped'; reason = `Local estimate found ${voiced.toFixed(1)} s of speech (needs ≥2 s): silence or very quiet audio was not checked`; }
     const sequence = rec.session.windows.length, id = `w${sequence}`;
     const window: AudioWindow = { id, sessionId: rec.session.id, sequence, ...times, answerIds: purpose === 'monitor' ? this.answerIdsFor(rec, times) : [], source, purpose,
@@ -1204,7 +1213,7 @@ export class SwitchGuardService {
       const requests = rec.reviewRequests ?? [];
       const escalated = rec.session.evidence.filter(e => rec.session.resolutions.filter(r => r.evidenceId === e.id).at(-1)?.disposition === 'escalate').length
         + requests.filter(r => r.outcome?.outcome === 'escalated').length;
-      return { sessionId: rec.session.id, kind: rec.kind, displayName: rec.session.candidate.displayName, status: rec.status, createdAtEpochMs: rec.session.createdAtEpochMs, state: d.state, evidenceCount: rec.session.evidence.length, sandbox: rec.sandbox,
+      return { sessionId: rec.session.id, demo: !!rec.demo, kind: rec.kind, displayName: rec.session.candidate.displayName, status: rec.status, createdAtEpochMs: rec.session.createdAtEpochMs, state: d.state, evidenceCount: rec.session.evidence.length, sandbox: rec.sandbox,
         joinStatus: this.joinStatus(rec), interviewerJoined: !!rec.interviewer, candidateConnected: this.connected(rec, 'candidate'),
         openReviewRequests: requests.filter(r => { const s = this.reviewStatus(rec, r); return s === 'awaiting_response' || s === 'response_submitted' || s === 'expired'; }).length,
         reviewRequestsToReview: requests.filter(r => this.reviewStatus(rec, r) === 'evaluated').length, escalated,

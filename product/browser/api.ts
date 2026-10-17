@@ -131,7 +131,8 @@ export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) { super(message); }
 }
 
-export type Auth = { reviewerToken: string } | { candidateKey: string };
+/** Reviewer (token), candidate (per-session key) or judge (public demo: demo sessions only). */
+export type Auth = { reviewerToken: string } | { candidateKey: string } | { demo: true };
 
 export function reviewerToken(): string | undefined {
   try { return sessionStorage.getItem('sg.reviewerToken') ?? undefined; } catch { return undefined; }
@@ -139,7 +140,23 @@ export function reviewerToken(): string | undefined {
 export function setReviewerToken(token: string): void {
   try { sessionStorage.setItem('sg.reviewerToken', token); } catch { /* private mode: token lives only in memory */ }
 }
-/** In-page, accessible sign-in; validates before retaining the reviewer token. */
+const wantsSignIn = () => { try { return sessionStorage.getItem('sg.signIn') === '1'; } catch { return false; } };
+const setWantsSignIn = (on: boolean) => { try { if (on) sessionStorage.setItem('sg.signIn', '1'); else sessionStorage.removeItem('sg.signIn'); } catch { /* optional */ } };
+async function judgeDemoEnabled(): Promise<boolean> {
+  try { return (await (await fetch('/api/demo')).json() as { enabled?: boolean }).enabled === true; } catch { return false; }
+}
+/** Banner shown above every reviewer page in judge mode, with a way to sign in for real sessions. */
+function showJudgeBanner(): void {
+  if (document.getElementById('judge-banner')) return;
+  const signIn = el('button', { type: 'button' }, 'Interviewer sign-in');
+  signIn.addEventListener('click', () => { setWantsSignIn(true); location.reload(); });
+  const banner = el('div', { id: 'judge-banner', class: 'notice warn judge-banner', role: 'status' },
+    el('strong', {}, 'Judge demo · '), 'No login needed. Create an interview, open its candidate link in another tab, and review it here. You only see demo sessions; they are deleted after 24 hours. ', signIn);
+  const main = document.querySelector('main');
+  if (main?.parentElement) main.parentElement.insertBefore(banner, main); else document.body.prepend(banner);
+}
+/** In-page, accessible sign-in; validates before retaining the reviewer token. When the server runs
+ * the judge demo, pages open without a login in judge mode (demo sessions only). */
 export async function requireReviewer(): Promise<Auth> {
   const token = reviewerToken();
   if (token) {
@@ -149,6 +166,8 @@ export async function requireReviewer(): Promise<Auth> {
     } catch { return { reviewerToken: token }; }
     sessionStorage.removeItem('sg.reviewerToken');
   }
+  const demo = await judgeDemoEnabled();
+  if (demo && !wantsSignIn()) { document.body.classList.add('judge-mode'); showJudgeBanner(); return { demo: true }; }
   document.body.classList.add('signed-out');
   const input = el('input', { type: 'password', required: '', autocomplete: 'current-password', placeholder: 'Paste the reviewer token', id: 'reviewer-access', spellcheck: 'false' });
   const button = el('button', { class: 'primary', type: 'submit' }, 'Open workspace →');
@@ -158,6 +177,11 @@ export async function requireReviewer(): Promise<Auth> {
     el('label', { for: 'reviewer-access' }, 'Access token'),
     el('div', { class: 'auth-field' }, input, button), error,
     el('p', { class: 'auth-help' }, 'The server prints this token when it starts, or your operator sets it. It stays in this browser tab only.'));
+  if (demo) {
+    const back = el('button', { type: 'button' }, '← Back to the judge demo (no login)');
+    back.addEventListener('click', () => { setWantsSignIn(false); location.reload(); });
+    form.append(back);
+  }
   const art = el('div', { class: 'auth-signal' });
   const figure = el('figure', { class: 'auth-figure' }, art,
     el('span', { class: 'auth-tag auth-tag-tl' }, 'Fig. 1'),
@@ -184,7 +208,7 @@ export async function requireReviewer(): Promise<Auth> {
       try {
         const result = await fetch('/api/sessions', { headers: { 'x-reviewer-token': value } });
         if (!result.ok) throw new Error(result.status === 401 || result.status === 403 ? 'That token was not recognized. Please try again.' : 'The workspace is unavailable. Please try again.');
-        setReviewerToken(value); document.body.classList.remove('signed-out'); main.replaceChildren(); resolve({ reviewerToken: value });
+        setReviewerToken(value); setWantsSignIn(false); document.body.classList.remove('signed-out'); main.replaceChildren(); resolve({ reviewerToken: value });
       } catch(e) { error.textContent = e instanceof Error ? e.message : 'Could not connect.'; }
       finally { button.disabled = false; button.textContent = 'Open workspace →'; }
     });
@@ -197,8 +221,11 @@ export function candidateFromHash(): { sessionId: string; auth: Auth } | undefin
   return sessionId && key ? { sessionId, auth: { candidateKey: key } } : undefined;
 }
 
+export function authHeaders(auth: Auth): Record<string, string> {
+  return 'reviewerToken' in auth ? { 'x-reviewer-token': auth.reviewerToken } : 'candidateKey' in auth ? { 'x-session-key': auth.candidateKey } : { 'x-demo': '1' };
+}
 function headers(auth: Auth, extra: Record<string, string> = {}): Record<string, string> {
-  return { ...extra, ...('reviewerToken' in auth ? { 'x-reviewer-token': auth.reviewerToken } : { 'x-session-key': auth.candidateKey }) };
+  return { ...extra, ...authHeaders(auth) };
 }
 
 export async function request<T>(auth: Auth, method: string, path: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<T> {

@@ -1,7 +1,7 @@
 /** Shared rendering helpers for the reviewer-side pages (home, reviewer, sandbox, report).
  * Identity (speaker) and authenticity are always rendered as separate indicators. */
-import { ApiError, el, fmtMs } from './api.js';
-import type { ReviewerView, WindowView } from './api.js';
+import { ApiError, authHeaders, el, fmtMs } from './api.js';
+import type { Auth, ReviewerView, WindowView } from './api.js';
 import type { ApplicationState, AuthenticityResult, ProviderMeta, SpeakerResult } from '../../src/shared/contracts.js';
 
 export type Tone = 'ok' | 'warn' | 'bad' | 'info' | 'gap';
@@ -169,8 +169,8 @@ export function sessionIdFromQuery(): string | undefined {
 }
 
 /** Downloads the JSON export with the reviewer header (no token in URLs). */
-export async function downloadExport(token: string, sessionId: string): Promise<void> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/export`, { headers: { 'x-reviewer-token': token } });
+export async function downloadExport(auth: Auth, sessionId: string): Promise<void> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/export`, { headers: authHeaders(auth) });
   if (!response.ok) throw new ApiError(response.status, 'export_failed', `Export failed: HTTP ${response.status}`);
   const url = URL.createObjectURL(await response.blob());
   const a = el('a', { href: url, download: `switchguard-${sessionId}.json` });
