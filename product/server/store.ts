@@ -108,3 +108,94 @@ export class MemoryStore implements SharedStore {
   async ping() { /* always reachable */ }
   get mediaCount() { return this.media.size; }
 }
+
+/** Supabase: session records in Postgres (table `sg_sessions`, optimistic concurrency on `version`)
+ * and media in a private Storage bucket. Plain REST through fetch; no per-request quota like Blob's.
+ * Needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (server-side only). Schema: product/server/supabase.sql. */
+export class SupabaseStore implements SharedStore {
+  readonly name = 'supabase';
+  private readonly base: string;
+  constructor(url: string, private readonly key: string, private readonly bucket = 'switchguard-media', private readonly http: typeof fetch = fetch) {
+    this.base = url.replace(/\/+$/, '');
+  }
+  private headers(extra: Record<string, string> = {}): Record<string, string> {
+    // Legacy service_role keys are JWTs and go in Authorization too; new sb_secret_ keys only in apikey.
+    return { apikey: this.key, ...(this.key.startsWith('eyJ') ? { authorization: `Bearer ${this.key}` } : {}), ...extra };
+  }
+  private async req(path: string, init: RequestInit & { headers?: Record<string, string> } = {}): Promise<Response> {
+    return this.http(`${this.base}${path}`, { ...init, headers: this.headers(init.headers) });
+  }
+  private async fail(res: Response, what: string): Promise<never> {
+    throw new Error(`Supabase ${what} failed (${res.status}): ${(await res.text().catch(() => '')).slice(0, 200)}`);
+  }
+  private rows = (q: string) => `/rest/v1/sg_sessions?${q}`;
+  private object = (sid: string, name: string) => `/storage/v1/object/${this.bucket}/media/${sid}/${encodeURIComponent(name)}`;
+
+  async getRecord(id: string) {
+    const res = await this.req(this.rows(`id=eq.${encodeURIComponent(id)}&select=json,version`));
+    if (!res.ok) return this.fail(res, 'read');
+    const [row] = await res.json() as Array<{ json: string; version: number }>;
+    return row ? { json: row.json, etag: String(row.version) } : undefined;
+  }
+  async putRecord(id: string, json: string, ifMatch: string | undefined): Promise<string> {
+    if (ifMatch === undefined) {
+      const res = await this.req(this.rows(''), { method: 'POST', headers: { 'content-type': 'application/json', prefer: 'return=minimal' }, body: JSON.stringify({ id, json, version: 1 }) });
+      if (res.status === 409) throw new StoreConflict(id);
+      if (!res.ok) return this.fail(res, 'create');
+      return '1';
+    }
+    const version = Number(strongEtag(ifMatch).replace(/"/g, ''));
+    if (!Number.isInteger(version)) throw new StoreConflict(id);
+    const res = await this.req(this.rows(`id=eq.${encodeURIComponent(id)}&version=eq.${version}`), {
+      method: 'PATCH', headers: { 'content-type': 'application/json', prefer: 'return=representation' },
+      body: JSON.stringify({ json, version: version + 1, updated_at: new Date().toISOString() }),
+    });
+    if (!res.ok) return this.fail(res, 'update');
+    const updated = await res.json() as unknown[];
+    if (!updated.length) throw new StoreConflict(id);   // someone else wrote first (or it was deleted)
+    return String(version + 1);
+  }
+  async deleteRecord(id: string) {
+    const res = await this.req(this.rows(`id=eq.${encodeURIComponent(id)}`), { method: 'DELETE' });
+    if (!res.ok) await this.fail(res, 'delete');
+  }
+  async listRecords() {
+    const out: Array<{ id: string; etag: string }> = [];
+    for (let from = 0; ; from += 1000) {
+      const res = await this.req(this.rows(`select=id,version&order=id&offset=${from}&limit=1000`));
+      if (!res.ok) return this.fail(res, 'list');
+      const page = await res.json() as Array<{ id: string; version: number }>;
+      for (const r of page) out.push({ id: r.id, etag: String(r.version) });
+      if (page.length < 1000) return out;
+    }
+  }
+  async putMedia(sid: string, name: string, bytes: Uint8Array, contentType: string) {
+    const res = await this.req(this.object(sid, name), { method: 'POST', headers: { 'content-type': contentType, 'x-upsert': 'true' }, body: new Blob([new Uint8Array(bytes)]) });
+    if (!res.ok) await this.fail(res, 'media upload');
+  }
+  async getMedia(sid: string, name: string) {
+    const res = await this.req(this.object(sid, name));
+    if (res.status === 400 || res.status === 404) return undefined;   // Storage reports a missing object as 400 or 404
+    if (!res.ok) return this.fail(res, 'media read');
+    return Buffer.from(await res.arrayBuffer());
+  }
+  private async removeObjects(paths: string[]) {
+    if (!paths.length) return;
+    const res = await this.req(`/storage/v1/object/${this.bucket}`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prefixes: paths }) });
+    if (!res.ok) await this.fail(res, 'media delete');
+  }
+  async deleteMedia(sid: string, name: string) { await this.removeObjects([`media/${sid}/${name}`]); }
+  async deleteSessionMedia(sid: string) {
+    for (;;) {
+      const res = await this.req(`/storage/v1/object/list/${this.bucket}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prefix: `media/${sid}`, limit: 1000, offset: 0 }) });
+      if (!res.ok) return this.fail(res, 'media list');
+      const names = (await res.json() as Array<{ name: string }>).map(o => `media/${sid}/${o.name}`);
+      await this.removeObjects(names);
+      if (names.length < 1000) return;
+    }
+  }
+  async ping() {
+    const res = await this.req(this.rows('select=id&limit=1'));
+    if (!res.ok) await this.fail(res, 'ping');
+  }
+}

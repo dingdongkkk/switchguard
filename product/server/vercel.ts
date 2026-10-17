@@ -7,7 +7,7 @@ import { waitUntil } from '@vercel/functions';
 import { DetectifClient } from '../../src/server/detectif.js';
 import { createRequestHandler } from './app.js';
 import { SwitchGuardService, defaultConfig } from './service.js';
-import { BlobStore } from './store.js';
+import { BlobStore, SupabaseStore } from './store.js';
 
 const num = (name: string, fallback: number, min: number, max: number) => {
   const n = Number(process.env[name] ?? fallback);
@@ -15,7 +15,9 @@ const num = (name: string, fallback: number, min: number, max: number) => {
 };
 const configProblems: string[] = [];
 if (!process.env.REVIEWER_TOKEN || process.env.REVIEWER_TOKEN.length < 16) configProblems.push('REVIEWER_TOKEN (at least 16 characters) is not set');
-if (!process.env.BLOB_READ_WRITE_TOKEN) configProblems.push('No Vercel Blob store is connected (BLOB_READ_WRITE_TOKEN missing)');
+// Supabase when configured (no per-request quota); otherwise Vercel Blob.
+const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY;
+if (!supabase && !process.env.BLOB_READ_WRITE_TOKEN) configProblems.push('No shared store: set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY, or connect a Vercel Blob store');
 
 const service = new SwitchGuardService(new DetectifClient(process.env.DETECTIF_API_TOKEN || process.env.DETECTIF_API_KEY || undefined), {
   ...defaultConfig('/tmp/switchguard'),
@@ -24,7 +26,7 @@ const service = new SwitchGuardService(new DetectifClient(process.env.DETECTIF_A
   maxTargetedChecks: num('TARGETED_CHECKS', 8, 0, 200),
   sessionRetentionDays: num('SESSION_RETENTION_DAYS', 30, 0, 3650),
   lowCreditThreshold: num('LOW_CREDIT_THRESHOLD', 300, 0, 1_000_000),
-  sharedStore: new BlobStore(),
+  sharedStore: supabase ? new SupabaseStore(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!) : new BlobStore(),
   inlineVoice: true,
 });
 
