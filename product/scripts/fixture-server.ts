@@ -40,7 +40,7 @@ const fake: typeof fetch = async (input, init) => {
     : path === '/speakers/enroll' ? { request_id: 'fixture', operation_id: 'fixture', speaker: { speaker_id: form?.get('speaker_id') }, quality: { speech_seconds: 18 }, credits: { charged: 50 } }
     : path === '/speakers/verify' ? { request_id: 'fixture', operation_id: 'fixture', model: { name: 'fixture', version: '0' }, latency_ms: 850, credits: { charged: 100 },
       result: { decision: mode.decision, similarity: mode.decision === 'match' ? 0.74 : 0.18, threshold: 0.53, duration_seconds: 7 },
-      deepfake: { verdict: mode.verdict, decided_by: 'main_model', score: mode.verdict === 'fake' ? 0.97 : 0.1, segments: [{ start: 2, end: 4, score: mode.verdict === 'fake' ? 0.95 : 0.1 }], operation_id: 'fixture' } }
+      deepfake: { verdict: mode.verdict, decided_by: 'main_model', score: mode.verdict === 'fake' ? 0.97 : mode.verdict === 'not_sure' ? 0.55 : 0.1, threshold: 0.62, segments: [{ start: 2, end: 4, score: mode.verdict === 'fake' ? 0.95 : 0.1 }], operation_id: 'fixture' } }
     : path === '/health' ? { status: 'ok', note: 'fixture' } : path === '/credits' ? { plan: 'fixture', available: null } : { deleted: true };
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 };

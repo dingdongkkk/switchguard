@@ -20,3 +20,13 @@
 body.workspace .judge-banner { margin: 16px 40px 0; }
 @media (max-width: 1200px) { body.workspace .judge-banner { margin: 16px 28px 0; } }
 @media (max-width: 760px) { body.workspace .judge-banner { margin: 12px 20px 0; } }
+/* AI-likeness meter (DetectifAI deepfake score). */
+.ai-meter { margin-top: 10px; display: grid; gap: 6px; }
+.ai-meter .muted { font-size: 10px; }
+.ai-bar { position: relative; height: 6px; border-radius: 999px; background: var(--gap-bg); overflow: visible; }
+.ai-fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px; min-width: 3px; }
+.ai-ok .ai-fill { background: var(--ok); }
+.ai-warn .ai-fill { background: var(--warn); }
+.ai-bad .ai-fill { background: var(--bad); }
+.ai-threshold { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); opacity: .45; border-radius: 1px; }
+.link-button { background: none; border: 0; padding: 0; min-height: 0; color: inherit; text-decoration: underline; cursor: pointer; font: inherit; }

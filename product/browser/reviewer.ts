@@ -4,7 +4,7 @@ import { api, ApiError, el, fmtMs, GESTURE_LABEL, JOIN_LABEL, mediaUrl, requireR
 import type { ChallengeView, GestureCheckView, GestureName, ReviewerView, ReviewRequestView, VoiceSignalView, WindowView } from './api.js';
 import type { ReviewerResolution, Segment } from '../../src/shared/contracts.js';
 import {
-  $, authenticityIndicator, badge, clear, consentSummary, copyButton, coverageBadge, downloadExport, errorText, flaggedIds,
+  $, aiLikeness, aiMeter, authenticityIndicator, badge, clear, consentSummary, copyButton, coverageBadge, downloadExport, errorText, flaggedIds,
   fmtEpoch, fmtRange, fmtSec, notice, provenanceBadge, providerLine, reasonText, sessionIdFromQuery, speakerIndicator,
   stateBadge, table, windowTone,
 } from './render.js';
@@ -141,12 +141,32 @@ function renderHeader(view: ReviewerView): void {
 }
 
 // ---------- current status ----------
+/** Highest DetectifAI AI-likeness score across the interview's checked windows. */
+function peakAi(view: ReviewerView): HTMLElement | '' {
+  let best: { pct: number; level: string; tone: Parameters<typeof badge>[1]; w: (typeof view.windows)[number] } | undefined;
+  let checked = 0;
+  for (const w of view.windows) {
+    const r = w.result;
+    if (r?.authenticity.status !== 'complete') continue;
+    const ai = aiLikeness(r.raw, r.authenticity.verdict);
+    if (!ai) continue;
+    checked++;
+    if (!best || ai.pct > best.pct) best = { pct: ai.pct, level: ai.level, tone: ai.tone, w };
+  }
+  if (!best) return '';
+  const open = el('button', { type: 'button', class: 'link-button' }, `window #${best.w.sequence}`);
+  const target = best.w.id;
+  open.addEventListener('click', () => select(target));
+  return el('div', { class: 'row' }, el('span', {}, `Peak AI-likeness this interview (${checked} checked window${checked === 1 ? '' : 's'}):`),
+    badge(`${best.level} · ${best.pct}%`, best.tone), el('span', { class: 'muted' }, 'at'), open);
+}
+
 function renderStatus(view: ReviewerView): void {
   const d = view.decision;
   const latest = d.latestWindowId ? view.windows.find((w) => w.id === d.latestWindowId) : undefined;
   const result = latest?.result;
   const ageMs = view.checkAgeMs;
-  renderIf('status', [d, ageMs === undefined ? null : Math.floor(ageMs / 1000), latest?.id, result?.provenance], (node) => {
+  renderIf('status', [d, ageMs === undefined ? null : Math.floor(ageMs / 1000), latest?.id, result?.provenance, view.windows.filter((w) => w.result).length], (node) => {
     node.append(
       el('h2', {}, view.decision.state === 'monitoring_interrupted' ? 'Monitoring interrupted · last recorded signals' : 'Latest voice signals'),
       el('div', { class: 'row' }, stateBadge(d.state)),
@@ -160,6 +180,7 @@ function renderStatus(view: ReviewerView): void {
         el('span', {}, ` · pending checks: ${d.pending}`),
         el('span', {}, ' · provenance: '), provenanceBadge(result?.provenance)),
       latest ? el('div', { class: 'muted' }, `Latest window #${latest.sequence}: ${fmtRange(latest.startMs, latest.endMs)}`) : '',
+      peakAi(view),
       notice('The system never rejects a candidate; a reviewer decides.'),
     );
   });

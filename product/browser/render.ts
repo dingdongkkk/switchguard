@@ -1,6 +1,8 @@
 /** Shared rendering helpers for the reviewer-side pages (home, reviewer, sandbox, report).
  * Identity (speaker) and authenticity are always rendered as separate indicators. */
 import { ApiError, authHeaders, el, fmtMs } from './api.js';
+import { aiLikeness } from './ai-score.js';
+export { aiLikeness } from './ai-score.js';
 import type { Auth, ReviewerView, WindowView } from './api.js';
 import type { ApplicationState, AuthenticityResult, ProviderMeta, SpeakerResult } from '../../src/shared/contracts.js';
 
@@ -94,12 +96,30 @@ export function speakerIndicator(s: SpeakerResult | undefined, withProvider = fa
   return box;
 }
 
+/** "AI-likeness: Low · 18%" with a bar and the model's threshold marked. */
+export function aiMeter(raw: unknown, verdict: 'real' | 'fake' | 'not_sure' | undefined): HTMLElement | '' {
+  const ai = aiLikeness(raw, verdict);
+  if (!ai) return '';
+  // Widths go through CSSOM: the page CSP (style-src 'self') blocks inline style attributes.
+  const fill = el('span', { class: 'ai-fill' }); fill.style.width = `${ai.pct}%`;
+  const bar = el('div', { class: `ai-bar ai-${ai.tone}`, role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(ai.pct), 'aria-label': 'AI-likeness score' }, fill);
+  if (ai.threshold !== undefined) {
+    const mark = el('span', { class: 'ai-threshold', title: `Model threshold ${Math.round(ai.threshold * 100)}%` }); mark.style.left = `${Math.round(ai.threshold * 100)}%`;
+    bar.append(mark);
+  }
+  return el('div', { class: 'ai-meter' },
+    el('div', { class: 'row' }, el('span', {}, 'AI-likeness:'), badge(`${ai.level} · ${ai.pct}%`, ai.tone)),
+    bar,
+    el('div', { class: 'muted' }, `DetectifAI model score${ai.threshold !== undefined ? ` (threshold ${Math.round(ai.threshold * 100)}%)` : ''}. A score, not a probability; the verdict decides.`));
+}
+
 export function authenticityIndicator(a: AuthenticityResult | undefined, raw?: unknown, withProvider = false): HTMLElement {
   const box = el('div', { class: 'signal-indicator' }, el('strong', {}, 'Voice authenticity'));
   if (!a) { box.append(badge('no result yet', 'gap')); return box; }
   if (a.status === 'complete') {
     const tone: Tone = a.verdict === 'real' ? 'ok' : a.verdict === 'fake' ? 'bad' : 'warn';
     box.append(badge(a.verdict === 'fake' ? 'Synthetic signal' : a.verdict === 'real' ? 'Genuine voice' : 'Uncertain', tone));
+    box.append(aiMeter(raw, a.verdict));
     const decidedBy = findKey(raw, 'decided_by');
     if (decidedBy !== undefined) box.append(el('div', { class: 'muted' }, `decided_by: ${typeof decidedBy === 'string' ? decidedBy : JSON.stringify(decidedBy)}`));
   } else {
